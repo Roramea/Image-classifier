@@ -1,4 +1,4 @@
 @echo off
 cd /d "%~dp0"
-python app.py
+"C:\Users\suisei\anaconda3\python.exe" app.py
 pause

@@ -13,7 +13,11 @@ def compute_md5(file_path: str) -> str:
 
 
 def dhash(image: Image.Image, hash_size: int = 8) -> str:
-    image = image.convert('L').resize((hash_size + 1, hash_size), Image.LANCZOS)
+    try:
+        resample_method = Image.Resampling.LANCZOS
+    except AttributeError:
+        resample_method = Image.LANCZOS
+    image = image.convert('L').resize((hash_size + 1, hash_size), resample_method)
     pixels = list(image.getdata())
     difference = []
     for row in range(hash_size):
@@ -33,15 +37,23 @@ def dhash(image: Image.Image, hash_size: int = 8) -> str:
 
 
 def hamming_distance(s1: str, s2: str) -> int:
-    if len(s1) != len(s2):
-        raise ValueError("Strings must be of equal length")
-    return sum(c1 != c2 for c1, c2 in zip(s1, s2))
+    if not s1 or not s2 or len(s1) != len(s2):
+        return float('inf')
+    
+    distance = 0
+    for c1, c2 in zip(s1, s2):
+        if c1 != c2:
+            nibble1 = int(c1, 16)
+            nibble2 = int(c2, 16)
+            xor = nibble1 ^ nibble2
+            distance += bin(xor).count('1')
+    return distance
 
 
 def compute_image_hash(file_path: str) -> str:
     try:
-        img = Image.open(file_path)
-        img = img.convert('RGB')
-        return dhash(img)
+        with Image.open(file_path) as img:
+            img = img.convert('RGB')
+            return dhash(img)
     except Exception:
         return ""

@@ -1,12 +1,16 @@
 import os
 import json
 import hashlib
+from datetime import datetime
 from typing import Dict, Optional
+
+from core.debug_manager import debug_manager
 
 
 class ClassificationManager:
     CONFIG_DIR = 'classifier_configs'
     MAX_RECENT_FOLDERS = 10
+    PROTECTED_FILES = {'debug_logs.json'}
     
     def __init__(self):
         self.shortcut_map: Dict[str, str] = {}
@@ -15,11 +19,15 @@ class ClassificationManager:
         self.recent_folders: list = []
         self.unfinished_session = None
         self.processed_duplicates: Dict[str, list] = {}
+        self.hash_threshold: int = 10
         if not os.path.exists(self.CONFIG_DIR):
             os.makedirs(self.CONFIG_DIR)
+            debug_manager.log_info('创建配置目录', 'config', path=self.CONFIG_DIR)
         self.load_recent_folders()
         self.load_unfinished_session()
         self.load_duplicate_memory()
+        self.load_settings()
+        debug_manager.log_info('ClassificationManager 初始化完成', 'config')
     
     def get_config_file(self, folder_path: str) -> str:
         folder_hash = hashlib.md5(folder_path.encode('utf-8')).hexdigest()
@@ -27,18 +35,24 @@ class ClassificationManager:
     
     def load_recent_folders(self):
         recent_file = os.path.join(self.CONFIG_DIR, 'recent_folders.json')
+        debug_manager.log_info('加载最近文件夹', 'config', file=recent_file)
         if os.path.exists(recent_file):
             try:
                 with open(recent_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     self.recent_folders = data.get('recent_folders', [])
-            except Exception:
+                debug_manager.log_info('最近文件夹加载成功', 'config', count=len(self.recent_folders))
+            except Exception as e:
+                debug_manager.log_exception(e, 'config', file=recent_file)
                 self.recent_folders = []
         else:
             self.recent_folders = []
+            debug_manager.log_info('最近文件夹文件不存在', 'config', file=recent_file)
         self.last_folder = self.recent_folders[0] if self.recent_folders else ""
+        debug_manager.log_info('最近文件夹加载完成', 'config', last_folder=self.last_folder)
     
     def save_recent_folders(self, folder_path: str):
+        debug_manager.log_info('保存最近文件夹', 'config', folder_path=folder_path)
         if folder_path in self.recent_folders:
             self.recent_folders.remove(folder_path)
         self.recent_folders.insert(0, folder_path)
@@ -50,10 +64,12 @@ class ClassificationManager:
             with open(recent_file, 'w', encoding='utf-8') as f:
                 json.dump({'recent_folders': self.recent_folders}, f, ensure_ascii=False, indent=2)
             self.last_folder = self.recent_folders[0]
-        except Exception:
-            pass
+            debug_manager.log_info('最近文件夹保存成功', 'config', count=len(self.recent_folders))
+        except Exception as e:
+            debug_manager.log_exception(e, 'config', file=recent_file)
     
     def load_config(self, folder_path: str = ""):
+        debug_manager.log_info('加载配置', 'config', folder_path=folder_path)
         if folder_path:
             self.current_folder = folder_path
             config_file = self.get_config_file(folder_path)
@@ -62,42 +78,91 @@ class ClassificationManager:
             config_file = self.get_config_file(self.last_folder)
         else:
             self.shortcut_map = {}
+            debug_manager.log_info('无配置文件，使用空映射', 'config')
             return
         
+        debug_manager.log_info('配置文件路径', 'config', file=config_file)
         if os.path.exists(config_file):
             try:
                 with open(config_file, 'r', encoding='utf-8') as f:
                     self.shortcut_map = json.load(f)
-            except Exception:
+                debug_manager.log_info('配置加载成功', 'config', shortcuts_count=len(self.shortcut_map))
+            except Exception as e:
+                debug_manager.log_exception(e, 'config', file=config_file)
                 self.shortcut_map = {}
         else:
             self.shortcut_map = {}
+            debug_manager.log_info('配置文件不存在', 'config', file=config_file)
     
     def save_config(self):
         if not self.current_folder:
+            debug_manager.log_error('无法保存配置', 'config', reason='current_folder为空')
             return False
         config_file = self.get_config_file(self.current_folder)
         try:
             with open(config_file, 'w', encoding='utf-8') as f:
                 json.dump(self.shortcut_map, f, ensure_ascii=False, indent=2)
             self.save_recent_folders(self.current_folder)
+            debug_manager.log_info('配置保存成功', 'config', file=config_file, shortcuts_count=len(self.shortcut_map))
             return True
-        except Exception:
+        except Exception as e:
+            debug_manager.log_exception(e, 'config', file=config_file)
             return False
+    
+    def load_settings(self):
+        settings_file = os.path.join(self.CONFIG_DIR, 'settings.json')
+        debug_manager.log_info('加载全局设置', 'config', file=settings_file)
+        if os.path.exists(settings_file):
+            try:
+                with open(settings_file, 'r', encoding='utf-8') as f:
+                    settings = json.load(f)
+                self.hash_threshold = settings.get('hash_threshold', 10)
+                debug_manager.log_info('全局设置加载成功', 'config', hash_threshold=self.hash_threshold)
+            except Exception as e:
+                debug_manager.log_exception(e, 'config', file=settings_file)
+                self.hash_threshold = 10
+        else:
+            self.hash_threshold = 10
+            debug_manager.log_info('全局设置文件不存在，使用默认值', 'config', hash_threshold=self.hash_threshold)
+    
+    def save_settings(self):
+        settings_file = os.path.join(self.CONFIG_DIR, 'settings.json')
+        debug_manager.log_info('保存全局设置', 'config', file=settings_file, hash_threshold=self.hash_threshold)
+        try:
+            settings = {
+                'hash_threshold': self.hash_threshold
+            }
+            with open(settings_file, 'w', encoding='utf-8') as f:
+                json.dump(settings, f, ensure_ascii=False, indent=2)
+            debug_manager.log_info('全局设置保存成功', 'config')
+        except Exception as e:
+            debug_manager.log_exception(e, 'config', file=settings_file)
+    
+    def get_hash_threshold(self) -> int:
+        return self.hash_threshold
+    
+    def set_hash_threshold(self, threshold: int):
+        self.hash_threshold = threshold
+        self.save_settings()
+        debug_manager.log_info('设置哈希阈值', 'config', threshold=threshold)
     
     def get_recent_folders(self) -> list:
         return self.recent_folders.copy()
     
     def load_unfinished_session(self):
         session_file = os.path.join(self.CONFIG_DIR, 'unfinished_session.json')
+        debug_manager.log_info('加载未完成会话', 'config', file=session_file)
         if os.path.exists(session_file):
             try:
                 with open(session_file, 'r', encoding='utf-8') as f:
                     self.unfinished_session = json.load(f)
-            except Exception:
+                debug_manager.log_info('未完成会话加载成功', 'config', session=self.unfinished_session)
+            except Exception as e:
+                debug_manager.log_exception(e, 'config', file=session_file)
                 self.unfinished_session = None
         else:
             self.unfinished_session = None
+            debug_manager.log_info('未完成会话文件不存在', 'config', file=session_file)
     
     def get_duplicate_memory_file(self) -> str:
         if not self.current_folder:
@@ -105,49 +170,164 @@ class ClassificationManager:
         folder_hash = hashlib.md5(self.current_folder.encode('utf-8')).hexdigest()
         return os.path.join(self.CONFIG_DIR, f'{folder_hash}_duplicates.json')
     
+    def get_hash_cache_file(self) -> str:
+        if not self.current_folder:
+            return ""
+        folder_hash = hashlib.md5(self.current_folder.encode('utf-8')).hexdigest()
+        return os.path.join(self.CONFIG_DIR, f'{folder_hash}_hash_cache.json')
+    
     def load_duplicate_memory(self):
+        debug_manager.log_info('加载重复图片记忆', 'config', current_folder=self.current_folder)
         if not self.current_folder:
             self.processed_duplicates = {}
+            debug_manager.log_info('无当前文件夹，使用空记忆', 'config')
             return
         memory_file = self.get_duplicate_memory_file()
+        debug_manager.log_info('重复图片记忆文件路径', 'config', file=memory_file)
         if os.path.exists(memory_file):
             try:
                 with open(memory_file, 'r', encoding='utf-8') as f:
                     self.processed_duplicates = json.load(f)
-            except Exception:
+                debug_manager.log_info('重复图片记忆加载成功', 'config', groups_count=len(self.processed_duplicates))
+            except Exception as e:
+                debug_manager.log_exception(e, 'config', file=memory_file)
                 self.processed_duplicates = {}
         else:
             self.processed_duplicates = {}
+            debug_manager.log_info('重复图片记忆文件不存在', 'config', file=memory_file)
+    
+    def load_hash_cache(self) -> dict:
+        debug_manager.log_info('加载哈希缓存', 'config', current_folder=self.current_folder)
+        if not self.current_folder:
+            debug_manager.log_info('无当前文件夹，返回空缓存', 'config')
+            return {}
+        cache_file = self.get_hash_cache_file()
+        debug_manager.log_info('哈希缓存文件路径', 'config', file=cache_file)
+        if os.path.exists(cache_file):
+            try:
+                with open(cache_file, 'r', encoding='utf-8') as f:
+                    cache = json.load(f)
+                debug_manager.log_info('哈希缓存加载成功', 'config', cache_size=len(cache))
+                return cache
+            except Exception as e:
+                debug_manager.log_exception(e, 'config', file=cache_file)
+                return {}
+        else:
+            debug_manager.log_info('哈希缓存文件不存在', 'config', file=cache_file)
+            return {}
+    
+    def save_hash_cache(self, cache: dict):
+        if not self.current_folder:
+            debug_manager.log_warning('无法保存哈希缓存', 'config', reason='current_folder为空')
+            return
+        cache_file = self.get_hash_cache_file()
+        debug_manager.log_info('保存哈希缓存', 'config', file=cache_file, cache_size=len(cache))
+        try:
+            with open(cache_file, 'w', encoding='utf-8') as f:
+                json.dump(cache, f, ensure_ascii=False, indent=2)
+            debug_manager.log_info('哈希缓存保存成功', 'config', file=cache_file)
+        except Exception as e:
+            debug_manager.log_exception(e, 'config', file=cache_file)
+    
+    def check_files_changed(self, image_paths: list) -> tuple:
+        debug_manager.log_info('检查文件变化', 'hash', file_count=len(image_paths))
+        cache = self.load_hash_cache()
+        if not cache:
+            debug_manager.log_info('无缓存数据，需要重新分析', 'hash')
+            return True, image_paths
+        
+        cached_files = cache.get('files', {})
+        current_files = {}
+        for path in image_paths:
+            try:
+                stat = os.stat(path)
+                current_files[path] = {
+                    'size': stat.st_size,
+                    'mtime': stat.st_mtime
+                }
+            except Exception as e:
+                debug_manager.log_warning('获取文件信息失败', 'hash', path=path, error=str(e))
+                return True, image_paths
+        
+        changed_files = []
+        
+        for path, info in current_files.items():
+            if path not in cached_files:
+                debug_manager.log_info('发现新文件', 'hash', path=path)
+                changed_files.append(path)
+            else:
+                cached_info = cached_files[path]
+                if cached_info['size'] != info['size'] or cached_info['mtime'] != info['mtime']:
+                    debug_manager.log_info('文件内容变化', 'hash', path=path)
+                    changed_files.append(path)
+        
+        removed_files = set(cached_files.keys()) - set(current_files.keys())
+        if removed_files:
+            debug_manager.log_info('文件被删除', 'hash', removed_count=len(removed_files))
+        
+        if changed_files or removed_files:
+            debug_manager.log_info('文件有变化', 'hash', changed_count=len(changed_files), removed_count=len(removed_files))
+            return True, changed_files
+        else:
+            debug_manager.log_info('文件无变化，可使用缓存', 'hash')
+            return False, []
+    
+    def create_file_cache(self, image_paths: list) -> dict:
+        debug_manager.log_info('创建文件缓存', 'hash', file_count=len(image_paths))
+        files = {}
+        for path in image_paths:
+            try:
+                stat = os.stat(path)
+                files[path] = {
+                    'size': stat.st_size,
+                    'mtime': stat.st_mtime
+                }
+            except Exception as e:
+                debug_manager.log_warning('获取文件信息失败', 'hash', path=path, error=str(e))
+        
+        cache = {
+            'files': files,
+            'timestamp': datetime.now().isoformat()
+        }
+        return cache
     
     def save_unfinished_session(self, session_data: dict):
         session_file = os.path.join(self.CONFIG_DIR, 'unfinished_session.json')
+        debug_manager.log_info('保存未完成会话', 'config', session_data=session_data)
         try:
             with open(session_file, 'w', encoding='utf-8') as f:
                 json.dump(session_data, f, ensure_ascii=False, indent=2)
             self.unfinished_session = session_data
-        except Exception:
-            pass
+            debug_manager.log_info('未完成会话保存成功', 'config', file=session_file)
+        except Exception as e:
+            debug_manager.log_exception(e, 'config', file=session_file)
     
     def clear_unfinished_session(self):
         session_file = os.path.join(self.CONFIG_DIR, 'unfinished_session.json')
+        debug_manager.log_info('清除未完成会话', 'config', file=session_file)
         if os.path.exists(session_file):
             try:
                 os.remove(session_file)
-            except Exception:
-                pass
+                debug_manager.log_info('未完成会话文件已删除', 'config', file=session_file)
+            except Exception as e:
+                debug_manager.log_exception(e, 'config', file=session_file)
         self.unfinished_session = None
     
     def save_duplicate_memory(self):
         if not self.current_folder:
+            debug_manager.log_warning('无法保存重复图片记忆', 'config', reason='current_folder为空')
             return
         memory_file = self.get_duplicate_memory_file()
+        debug_manager.log_info('保存重复图片记忆', 'config', file=memory_file, groups_count=len(self.processed_duplicates))
         try:
             with open(memory_file, 'w', encoding='utf-8') as f:
                 json.dump(self.processed_duplicates, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
+            debug_manager.log_info('重复图片记忆保存成功', 'config', file=memory_file)
+        except Exception as e:
+            debug_manager.log_exception(e, 'config', file=memory_file)
     
     def add_processed_duplicate(self, md5_hash: str, deleted_paths: list):
+        debug_manager.log_info('添加已处理重复图片', 'config', md5_hash=md5_hash, deleted_count=len(deleted_paths))
         self.processed_duplicates[md5_hash] = deleted_paths
         self.save_duplicate_memory()
     
@@ -158,13 +338,15 @@ class ClassificationManager:
         return self.processed_duplicates.get(md5_hash, [])
     
     def clear_duplicate_memory(self):
-        self.processed_duplicates = {}
         memory_file = self.get_duplicate_memory_file()
+        debug_manager.log_info('清除重复图片记忆', 'config', file=memory_file)
+        self.processed_duplicates = {}
         if os.path.exists(memory_file):
             try:
                 os.remove(memory_file)
-            except Exception:
-                pass
+                debug_manager.log_info('重复图片记忆文件已删除', 'config', file=memory_file)
+            except Exception as e:
+                debug_manager.log_exception(e, 'config', file=memory_file)
     
     def check_all_duplicates_processed(self, all_duplicates: dict) -> bool:
         for md5_hash in all_duplicates.keys():
@@ -176,6 +358,9 @@ class ClassificationManager:
         total_size = 0
         if os.path.exists(self.CONFIG_DIR):
             for filename in os.listdir(self.CONFIG_DIR):
+                if filename in self.PROTECTED_FILES:
+                    continue
+                
                 filepath = os.path.join(self.CONFIG_DIR, filename)
                 if os.path.isfile(filepath):
                     total_size += os.path.getsize(filepath)
@@ -223,6 +408,9 @@ class ClassificationManager:
         
         if os.path.exists(self.CONFIG_DIR):
             for filename in os.listdir(self.CONFIG_DIR):
+                if filename in self.PROTECTED_FILES:
+                    continue
+                
                 filepath = os.path.join(self.CONFIG_DIR, filename)
                 if os.path.isfile(filepath):
                     file_size = os.path.getsize(filepath)
@@ -267,7 +455,8 @@ class ClassificationManager:
                 if os.path.isfile(filepath) and filename.endswith('.json'):
                     if not filename.endswith('_duplicates.json') and \
                        filename != 'recent_folders.json' and \
-                       filename != 'unfinished_session.json':
+                       filename != 'unfinished_session.json' and \
+                       filename not in self.PROTECTED_FILES:
                         try:
                             os.remove(filepath)
                         except Exception:
@@ -308,6 +497,9 @@ class ClassificationManager:
     def clear_all_storage(self):
         if os.path.exists(self.CONFIG_DIR):
             for filename in os.listdir(self.CONFIG_DIR):
+                if filename in self.PROTECTED_FILES:
+                    continue
+                
                 filepath = os.path.join(self.CONFIG_DIR, filename)
                 if os.path.isfile(filepath):
                     try:
@@ -328,18 +520,52 @@ class ClassificationManager:
                 return self.unfinished_session
         return None
     
+    def _is_valid_path(self, path: str) -> bool:
+        if not path or not isinstance(path, str):
+            debug_manager.log_warning('路径无效', 'config', path=path)
+            return False
+        
+        invalid_chars = '<>"|?*'
+        for char in invalid_chars:
+            if char in path:
+                debug_manager.log_warning('路径包含无效字符', 'config', path=path, invalid_char=char)
+                return False
+        
+        colon_count = path.count(':')
+        if colon_count > 1:
+            debug_manager.log_warning('路径包含多个冒号', 'config', path=path)
+            return False
+        
+        if colon_count == 1 and not (len(path) >= 2 and path[1] == ':' and path[0].isalpha()):
+            debug_manager.log_warning('冒号位置无效', 'config', path=path)
+            return False
+        
+        return True
+    
     def add_shortcut(self, shortcut: str, folder_path: str) -> bool:
         if shortcut in self.shortcut_map:
+            debug_manager.log_warning('快捷键已存在', 'config', shortcut=shortcut)
+            return False
+        
+        if not self._is_valid_path(folder_path):
+            debug_manager.log_error('路径验证失败', 'config', shortcut=shortcut, folder_path=folder_path)
             return False
         
         if not os.path.exists(folder_path):
             try:
                 os.makedirs(folder_path)
-            except Exception:
+                debug_manager.log_info('创建文件夹', 'config', folder_path=folder_path)
+            except Exception as e:
+                debug_manager.log_exception(e, 'config', folder_path=folder_path)
                 return False
         
         self.shortcut_map[shortcut] = folder_path
-        return self.save_config()
+        result = self.save_config()
+        if result:
+            debug_manager.log_info('快捷键添加成功', 'config', shortcut=shortcut, folder_path=folder_path)
+        else:
+            debug_manager.log_error('快捷键保存失败', 'config', shortcut=shortcut)
+        return result
     
     def remove_shortcut(self, shortcut: str) -> bool:
         if shortcut in self.shortcut_map:
@@ -356,12 +582,15 @@ class ClassificationManager:
     def classify_image(self, image_path: str, shortcut: str) -> bool:
         folder_path = self.get_folder(shortcut)
         if not folder_path:
+            debug_manager.log_error('找不到快捷键对应的文件夹', 'classify', shortcut=shortcut)
             return False
         
         if not os.path.exists(folder_path):
             try:
                 os.makedirs(folder_path)
-            except Exception:
+                debug_manager.log_info('创建分类文件夹', 'classify', folder_path=folder_path)
+            except Exception as e:
+                debug_manager.log_exception(e, 'classify', folder_path=folder_path)
                 return False
         
         try:
@@ -376,6 +605,8 @@ class ClassificationManager:
             
             import shutil
             shutil.move(image_path, dest_path)
+            debug_manager.log_info('图片分类成功', 'classify', image_path=image_path, dest_path=dest_path)
             return True
-        except Exception:
+        except Exception as e:
+            debug_manager.log_exception(e, 'classify', image_path=image_path, folder_path=folder_path)
             return False

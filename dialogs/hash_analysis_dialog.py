@@ -1,0 +1,307 @@
+import time
+
+from PyQt5.QtWidgets import QDialog, QLabel, QProgressBar, QVBoxLayout, QWidget, QHBoxLayout, QSlider
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QFont
+
+from services.hash_analysis_service import HashAnalysisService
+from core.debug_manager import debug_manager
+
+
+class HashAnalysisDialog(QDialog):
+    progress_updated_signal = pyqtSignal(int, int, str, str, int, int)
+    analysis_finished_signal = pyqtSignal(list, dict, list)
+    analysis_canceled_signal = pyqtSignal()
+    analysis_error_signal = pyqtSignal(str)
+    analysis_stage_changed_signal = pyqtSignal(str, int, int)
+    analysis_file_processed_signal = pyqtSignal(str, int, int)
+    threshold_changed = pyqtSignal(int)
+
+    def __init__(self, image_paths: list, threshold: int = 10, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("图片相似度分析")
+        self.setFixedSize(550, 360)
+        self.setModal(False)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+        self.setWindowModality(Qt.NonModal)
+
+        self.image_paths = image_paths
+        self.total_count = len(image_paths)
+        self.start_time = None
+        self.is_canceled = False
+        self.current_stage = 0
+        self.threshold = threshold
+
+        self.hash_service = HashAnalysisService(threshold)
+
+        self.init_ui()
+        self.connect_signals()
+    
+    def set_cached_hashes(self, cached_hashes: dict):
+        self.hash_service.set_cached_hashes(cached_hashes)
+
+    def init_ui(self):
+        layout = QVBoxLayout()
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        title_label = QLabel("图片相似度分析")
+        title_label.setFont(QFont("Microsoft YaHei", 14, QFont.Bold))
+        title_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title_label)
+
+        threshold_layout = QHBoxLayout()
+        threshold_layout.setSpacing(10)
+
+        threshold_label = QLabel("相似度阈值:")
+        threshold_label.setFont(QFont("Microsoft YaHei", 10))
+        threshold_label.setStyleSheet("color: #666666;")
+        threshold_layout.addWidget(threshold_label)
+
+        self.threshold_slider = QSlider(Qt.Horizontal)
+        self.threshold_slider.setMinimum(2)
+        self.threshold_slider.setMaximum(25)
+        self.threshold_slider.setValue(self.threshold)
+        self.threshold_slider.setTickPosition(QSlider.TicksBelow)
+        self.threshold_slider.setTickInterval(1)
+        self.threshold_slider.valueChanged.connect(self.on_threshold_changed)
+        threshold_layout.addWidget(self.threshold_slider)
+
+        self.threshold_value_label = QLabel(f"{self.threshold}")
+        self.threshold_value_label.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
+        self.threshold_value_label.setStyleSheet("color: #4a90d9; min-width: 30px;")
+        self.threshold_value_label.setAlignment(Qt.AlignCenter)
+        threshold_layout.addWidget(self.threshold_value_label)
+
+        layout.addLayout(threshold_layout)
+
+        threshold_hint = QLabel("阈值越小，相似度要求越高（2-25，默认10）")
+        threshold_hint.setFont(QFont("Microsoft YaHei", 9))
+        threshold_hint.setStyleSheet("color: #999999;")
+        threshold_hint.setAlignment(Qt.AlignCenter)
+        layout.addWidget(threshold_hint)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setMaximum(self.total_count * 3)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: 2px solid #cccccc;
+                border-radius: 5px;
+                text-align: center;
+                font-size: 12px;
+                color: #333333;
+            }
+            QProgressBar::chunk {
+                background-color: #4a90d9;
+                border-radius: 3px;
+            }
+        """)
+        layout.addWidget(self.progress_bar)
+
+        self.progress_text = QLabel("0 / 0 (0%)")
+        self.progress_text.setAlignment(Qt.AlignCenter)
+        self.progress_text.setFont(QFont("Microsoft YaHei", 11))
+        layout.addWidget(self.progress_text)
+
+        stage_layout = QHBoxLayout()
+        stage_layout.setSpacing(10)
+
+        stage_label_text = QLabel("阶段:")
+        stage_label_text.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
+        stage_label_text.setStyleSheet("color: #666666;")
+        stage_layout.addWidget(stage_label_text)
+
+        self.stage_label = QLabel("准备中...")
+        self.stage_label.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
+        self.stage_label.setStyleSheet("color: #4a90d9;")
+        stage_layout.addWidget(self.stage_label)
+
+        stage_layout.addStretch()
+
+        self.time_label = QLabel("预计剩余: --")
+        self.time_label.setFont(QFont("Microsoft YaHei", 10))
+        self.time_label.setStyleSheet("color: #666666;")
+        stage_layout.addWidget(self.time_label)
+
+        layout.addLayout(stage_layout)
+
+        self.current_stage_progress = QProgressBar()
+        self.current_stage_progress.setMaximum(100)
+        self.current_stage_progress.setValue(0)
+        self.current_stage_progress.setTextVisible(False)
+        self.current_stage_progress.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid #e0e0e0;
+                border-radius: 3px;
+                height: 6px;
+            }
+            QProgressBar::chunk {
+                background-color: #7db3e8;
+                border-radius: 2px;
+            }
+        """)
+        layout.addWidget(self.current_stage_progress)
+
+        file_label_title = QLabel("当前处理:")
+        file_label_title.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
+        layout.addWidget(file_label_title)
+
+        self.file_label = QLabel("")
+        self.file_label.setWordWrap(True)
+        self.file_label.setAlignment(Qt.AlignLeft)
+        self.file_label.setStyleSheet("color: #333333; font-size: 12px; background-color: #f5f5f5; padding: 8px; border-radius: 4px; min-height: 40px;")
+        layout.addWidget(self.file_label)
+
+        speed_layout = QHBoxLayout()
+        speed_layout.setSpacing(15)
+
+        self.speed_label = QLabel("处理速度: --")
+        self.speed_label.setFont(QFont("Microsoft YaHei", 10))
+        self.speed_label.setStyleSheet("color: #666666;")
+        speed_layout.addWidget(self.speed_label)
+
+        self.elapsed_label = QLabel("已用时: --")
+        self.elapsed_label.setFont(QFont("Microsoft YaHei", 10))
+        self.elapsed_label.setStyleSheet("color: #666666;")
+        speed_layout.addWidget(self.elapsed_label)
+
+        layout.addLayout(speed_layout)
+
+        self.setLayout(layout)
+
+    def connect_signals(self):
+        self.hash_service.progress_updated.connect(self.on_update_progress)
+        self.hash_service.analysis_finished.connect(self.on_analysis_finished)
+        self.hash_service.analysis_canceled.connect(self.on_analysis_canceled)
+        self.hash_service.analysis_error.connect(self.on_analysis_error)
+        self.hash_service.analysis_stage_changed.connect(self.on_stage_changed)
+        self.hash_service.analysis_file_processed.connect(self.on_file_processed)
+
+    def showEvent(self, event):
+        debug_manager.log_info('哈希对话框显示', 'hash')
+        super().showEvent(event)
+        self.start_analysis()
+
+    def start_analysis(self):
+        debug_manager.log_info('开始哈希分析', 'hash', image_count=self.total_count, threshold=self.threshold)
+        self.start_time = time.time()
+        self.is_canceled = False
+        self.current_stage = 0
+
+        self.hash_service.start_analysis(self.image_paths)
+
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_time_display)
+        self.timer.start(500)
+    
+    def on_threshold_changed(self, value: int):
+        self.threshold = value
+        self.threshold_value_label.setText(str(value))
+        self.hash_service.set_threshold(value)
+        self.threshold_changed.emit(value)
+        debug_manager.log_info('用户调整相似度阈值', 'hash', threshold=value)
+
+    def on_update_progress(self, current: int, total: int, stage_name: str, filename: str, processed_count: int, stage_progress: int = 0):
+        self.progress_bar.setMaximum(total)
+        self.progress_bar.setValue(current)
+
+        percentage = int((current / total) * 100) if total > 0 else 0
+        self.progress_text.setText(f"{current} / {total} ({percentage}%)")
+
+        self.stage_label.setText(f"{self.hash_service.current_stage}/3: {stage_name}")
+        self.current_stage_progress.setValue(stage_progress)
+
+        if filename:
+            if len(filename) > 60:
+                filename = filename[:25] + "..." + filename[-30:]
+            self.file_label.setText(filename)
+        else:
+            self.file_label.setText("...")
+
+        if current > 0 and self.start_time:
+            self._update_time_info(current, total, processed_count)
+
+    def _update_time_info(self, current: int, total: int, processed_count: int):
+        elapsed = time.time() - self.start_time
+        avg_time_per_file = elapsed / processed_count if processed_count > 0 else 0
+        remaining_files = total - current
+        estimated_remaining = avg_time_per_file * remaining_files
+
+        self.time_label.setText(self._format_remaining_time(estimated_remaining))
+        self.elapsed_label.setText(self._format_elapsed_time(elapsed))
+
+        if elapsed > 0:
+            speed = processed_count / elapsed
+            if speed >= 1:
+                speed_str = f"处理速度: {speed:.1f} 张/秒"
+            else:
+                speed_str = f"处理速度: {elapsed / processed_count:.1f} 秒/张"
+            self.speed_label.setText(speed_str)
+
+    @staticmethod
+    def _format_remaining_time(seconds: float) -> str:
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = int(seconds % 60)
+
+        if hours > 0:
+            return f"预计剩余: {hours}h{minutes}m{secs}s"
+        elif minutes > 0:
+            return f"预计剩余: {minutes}m{secs}s"
+        else:
+            return f"预计剩余: {secs}s"
+
+    @staticmethod
+    def _format_elapsed_time(seconds: float) -> str:
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = int(seconds % 60)
+
+        if hours > 0:
+            return f"已用时: {hours}h{minutes}m{secs}s"
+        elif minutes > 0:
+            return f"已用时: {minutes}m{secs}s"
+        else:
+            return f"已用时: {secs}s"
+
+    def update_time_display(self):
+        if self.start_time:
+            elapsed = time.time() - self.start_time
+            self.elapsed_label.setText(self._format_elapsed_time(elapsed))
+
+    def on_analysis_finished(self, groups: list, duplicates: dict, hash_list: list = None):
+        debug_manager.log_info('哈希分析完成', 'hash', group_count=len(groups), duplicate_groups=len(duplicates))
+        self.timer.stop()
+        self.analysis_finished_signal.emit(groups, duplicates, hash_list)
+        self.accept()
+
+    def on_analysis_canceled(self):
+        self.is_canceled = True
+        self.timer.stop()
+        self.analysis_canceled_signal.emit()
+        self.accept()
+
+    def on_analysis_error(self, error: str):
+        self.timer.stop()
+        debug_manager.log_error('哈希分析出错', 'hash', error=error)
+        self.analysis_error_signal.emit(error)
+        self.accept()
+
+    def on_stage_changed(self, stage: str, current: int, total: int):
+        debug_manager.log_info('哈希分析阶段变更', 'hash', stage=stage, current=current, total=total)
+        self.analysis_stage_changed_signal.emit(stage, current, total)
+
+    def on_file_processed(self, filename: str, current: int, total: int):
+        debug_manager.log_info('哈希分析文件处理', 'hash', filename=filename, current=current, total=total)
+        self.analysis_file_processed_signal.emit(filename, current, total)
+
+    def cancel_analysis(self):
+        self.is_canceled = True
+        self.hash_service.cancel()
+
+    def closeEvent(self, event):
+        if not self.is_canceled:
+            self.cancel_analysis()
+        event.accept()

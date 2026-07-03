@@ -2,9 +2,10 @@ import os
 import hashlib
 from PIL import Image
 from collections import defaultdict
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Optional
 
-from simple_hash import compute_image_hash, hamming_distance
+from .simple_hash import compute_image_hash, hamming_distance, dhash
+from .debug_manager import debug_manager
 
 
 class ImageScanner:
@@ -17,13 +18,20 @@ class ImageScanner:
         self.similar_groups: List[List[str]] = []
     
     def scan_folder(self, folder_path: str) -> int:
+        debug_manager.log_info('开始扫描文件夹', 'scanner', folder_path=folder_path)
         self.image_paths = []
-        for root, dirs, files in os.walk(folder_path):
-            for file in files:
-                ext = os.path.splitext(file)[1].lower()
-                if ext in self.SUPPORTED_EXTENSIONS:
-                    self.image_paths.append(os.path.join(root, file))
-        return len(self.image_paths)
+        try:
+            for root, dirs, files in os.walk(folder_path):
+                for file in files:
+                    ext = os.path.splitext(file)[1].lower()
+                    if ext in self.SUPPORTED_EXTENSIONS:
+                        self.image_paths.append(os.path.join(root, file))
+            count = len(self.image_paths)
+            debug_manager.log_info('扫描完成', 'scanner', folder_path=folder_path, image_count=count)
+            return count
+        except Exception as e:
+            debug_manager.log_exception(e, 'scanner', folder_path=folder_path)
+            return 0
     
     def compute_md5(self, file_path: str) -> Optional[str]:
         try:
@@ -32,18 +40,21 @@ class ImageScanner:
                 for chunk in iter(lambda: f.read(8192), b''):
                     hash_md5.update(chunk)
             return hash_md5.hexdigest()
-        except Exception:
+        except Exception as e:
+            debug_manager.log_warning('计算MD5失败', 'scanner', file_path=file_path)
             return None
     
     def compute_image_hash(self, file_path: str) -> Optional[str]:
         try:
-            img = Image.open(file_path)
-            img = img.convert('RGB')
-            return compute_image_hash(file_path)
-        except Exception:
+            with Image.open(file_path) as img:
+                img = img.convert('RGB')
+                return dhash(img)
+        except Exception as e:
+            debug_manager.log_warning('计算图像哈希失败', 'scanner', file_path=file_path, error=str(e))
             return None
     
     def find_duplicates(self) -> Dict[str, List[str]]:
+        debug_manager.log_info('开始查找重复图片', 'scanner', image_count=len(self.image_paths))
         self.md5_hash_map = defaultdict(list)
         for path in self.image_paths:
             md5 = self.compute_md5(path)
@@ -51,9 +62,11 @@ class ImageScanner:
                 self.md5_hash_map[md5].append(path)
         
         duplicates = {md5: paths for md5, paths in self.md5_hash_map.items() if len(paths) > 1}
+        debug_manager.log_info('重复图片查找完成', 'scanner', duplicate_groups=len(duplicates))
         return duplicates
     
     def group_similar_images(self, threshold: int = 10) -> List[List[str]]:
+        debug_manager.log_info('开始相似图片分组', 'scanner', image_count=len(self.image_paths), threshold=threshold)
         hash_list = []
         for path in self.image_paths:
             img_hash = self.compute_image_hash(path)
@@ -82,6 +95,7 @@ class ImageScanner:
             groups.append(group)
         
         self.similar_groups = sorted(groups, key=lambda x: len(x), reverse=True)
+        debug_manager.log_info('相似图片分组完成', 'scanner', group_count=len(self.similar_groups))
         return self.similar_groups
     
     def get_all_images(self) -> List[str]:
