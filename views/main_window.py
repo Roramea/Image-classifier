@@ -1,21 +1,16 @@
 import os
-from datetime import datetime
+from collections import OrderedDict
 
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton, QFileDialog, QProgressBar,
-    QMessageBox, QListWidget, QListWidgetItem,
-    QScrollArea, QSplitter, QGroupBox, QDialog, QComboBox,
-    QSlider, QShortcut, QTableWidget, QTableWidgetItem, QCheckBox,
-    QSizePolicy
+    QLabel, QPushButton, QMessageBox, QLineEdit, QToolButton,
+    QListWidget, QListWidgetItem, QScrollArea, QSplitter,
+    QGroupBox, QComboBox, QSlider, QShortcut, QSizePolicy,
+    QDialog
 )
-from PyQt5.QtGui import QPixmap, QFont, QTransform, QKeySequence, QColor
-from PyQt5.QtCore import Qt, QSize
+from PyQt5.QtGui import QPixmap, QFont, QTransform, QKeySequence, QColor, QKeyEvent
+from PyQt5.QtCore import Qt, QSize, QTimer
 
-from core.scan_thread import ScanThread
-from core.classification_manager import ClassificationManager
-from services.duplicate_service import DuplicateService
-from services.classification_service import ClassificationService
 from dialogs.duplicate_detail_dialog import DuplicateDetailDialog
 from dialogs.storage_clean_dialog import StorageCleanDialog
 from dialogs.folder_select_dialog import FolderSelectDialog
@@ -23,6 +18,8 @@ from dialogs.shortcut_input_dialog import ShortcutInputDialog
 from dialogs.hash_analysis_dialog import HashAnalysisDialog
 from core.debug_manager import debug_manager
 from core.utils import key_to_string
+from presenters.main_presenter import MainPresenter
+from widgets.scrolling_label import ScrollingLabel
 
 
 class MainWindow(QMainWindow):
@@ -31,37 +28,98 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("图片分类器")
         self.setGeometry(100, 100, 1200, 800)
 
-        self._init_services()
-        self._init_state()
+        # 阈值滑块防抖定时器：拖动时只更新数字显示，停止 300ms 后才执行重分组
+        self._threshold_timer = QTimer(self)
+        self._threshold_timer.setSingleShot(True)
+        self._threshold_timer.setInterval(300)
+        self._threshold_timer.timeout.connect(self._apply_threshold)
+        self._pending_threshold = None
+
+        # 图片缓存（LRU）：避免重复解码大图，提升切换浏览速度
+        self._image_cache = OrderedDict()
+        self._image_cache_max = 10
+
+        self.presenter = MainPresenter(self)
         self.init_ui()
         self.connect_signals()
-        self._load_initial_data()
+        self.presenter.load_initial_data()
 
         debug_manager.log_info('主窗口初始化完成', 'main')
 
-    def _init_services(self):
-        self.classifier = ClassificationManager()
-        self.duplicate_service = DuplicateService(self.classifier)
-        self.classification_service = ClassificationService(self.classifier)
-
-    def _init_state(self):
-        self.hash_scanning = False
-        self.hash_completed = False
-        self.hash_list = []
-        self.group_rotations = {}
-        debug_manager.log_info('初始化旋转状态', 'rotation', group_rotations_empty=True)
-
-    def _load_initial_data(self):
-        self.classifier.load_config()
-        self.load_shortcuts()
-        self.check_unfinished_session()
-
-        if self.classifier.last_folder:
-            self.status_label.setText(f"上次分类: {os.path.basename(self.classifier.last_folder)}")
-        else:
-            self.status_label.setText("请选择图片文件夹开始分类")
+    def closeEvent(self, event):
+        """应用关闭时通知 Presenter 保存未完成会话等清理工作。"""
+        self.presenter.on_app_close()
+        super().closeEvent(event)
 
     def init_ui(self):
+        self.setStyleSheet("""
+            QMainWindow {
+                background-color: #2d2d2d;
+            }
+            QWidget {
+                background-color: #2d2d2d;
+                color: #ffffff;
+            }
+            QGroupBox {
+                font-weight: bold;
+                color: #ecf0f1;
+                border: 1px solid #34495e;
+                border-radius: 5px;
+                margin-top: 10px;
+                padding-top: 15px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px 0 5px;
+                color: #3498db;
+            }
+            QPushButton {
+                background-color: #34495e;
+                color: #ecf0f1;
+                border: 1px solid #2c3e50;
+                border-radius: 3px;
+                padding: 6px 12px;
+                min-width: 80px;
+            }
+            QPushButton:hover {
+                background-color: #3d566e;
+            }
+            QPushButton:pressed {
+                background-color: #2c3e50;
+            }
+            QLabel {
+                color: #ecf0f1;
+            }
+            QComboBox {
+                background-color: #34495e;
+                color: #ecf0f1;
+                border: 1px solid #2c3e50;
+                border-radius: 3px;
+                padding: 4px;
+            }
+            QListWidget {
+                background-color: #1e1e1e;
+                color: #ecf0f1;
+                border: 1px solid #2c3e50;
+                border-radius: 3px;
+            }
+            QSlider::groove:horizontal {
+                height: 6px;
+                background: #2c3e50;
+                border-radius: 3px;
+            }
+            QSlider::handle:horizontal {
+                background: #3498db;
+                width: 16px;
+                margin: -5px 0;
+                border-radius: 8px;
+            }
+            QScrollArea {
+                border: none;
+            }
+        """)
+
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QHBoxLayout(central_widget)
@@ -70,6 +128,7 @@ class MainWindow(QMainWindow):
         right_panel = self._create_right_panel()
 
         splitter = QSplitter(Qt.Horizontal)
+        splitter.setStyleSheet("QSplitter::handle { background-color: #34495e; }")
         splitter.addWidget(left_panel)
         splitter.addWidget(right_panel)
         splitter.setSizes([300, 900])
@@ -78,182 +137,317 @@ class MainWindow(QMainWindow):
 
     def _create_left_panel(self):
         panel = QWidget()
+        panel.setMinimumWidth(220)
         layout = QVBoxLayout(panel)
+        layout.setSpacing(8)
+        layout.setContentsMargins(10, 10, 10, 10)
 
         select_btn = QPushButton("选择图片文件夹")
         select_btn.clicked.connect(self.select_folder)
+        select_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3498db;
+                border-color: #2980b9;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #2980b9;
+            }
+        """)
         layout.addWidget(select_btn)
 
         self.recent_combo = QComboBox()
         self.recent_combo.setPlaceholderText("最近分类的文件夹")
-        self.recent_combo.setMaximumWidth(280)
-        self.recent_combo.currentIndexChanged.connect(self.on_recent_folder_selected)
+        self.recent_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.recent_combo.setMinimumContentsLength(15)
+        self.recent_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.recent_combo.setFocusPolicy(Qt.NoFocus)
         layout.addWidget(self.recent_combo)
-        self.update_recent_folders()
 
-        self.status_label = QLabel("请选择图片文件夹开始分类")
+        self.status_label = ScrollingLabel()
+        self.status_label.setText("请选择图片文件夹开始分类")
+        self.status_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+        self.status_label.setScrollSpeed(30)
+        self.status_label.setMinimumHeight(20)
         layout.addWidget(self.status_label)
 
         threshold_group = QGroupBox("相似度阈值")
-        threshold_group.setVisible(False)
+        threshold_group.setVisible(True)
         self.threshold_group = threshold_group
         threshold_layout = QVBoxLayout(threshold_group)
 
         slider_layout = QHBoxLayout()
+        slider_layout.setSpacing(2)
         slider_label = QLabel("阈值:")
+        slider_label.setStyleSheet("color: #3498db;")
         slider_layout.addWidget(slider_label)
 
         self.threshold_slider = QSlider(Qt.Horizontal)
-        self.threshold_slider.setMinimum(2)
-        self.threshold_slider.setMaximum(25)
-        self.threshold_slider.setValue(self.classifier.get_hash_threshold())
+        self.threshold_slider.setRange(2, 25)
+        self.threshold_slider.setValue(10)
         self.threshold_slider.setTickPosition(QSlider.TicksBelow)
         self.threshold_slider.setTickInterval(1)
         self.threshold_slider.valueChanged.connect(self.on_threshold_changed)
         slider_layout.addWidget(self.threshold_slider)
 
-        self.threshold_value_label = QLabel(str(self.classifier.get_hash_threshold()))
-        self.threshold_value_label.setStyleSheet("color: #4a90d9; font-weight: bold; min-width: 30px; text-align: center;")
-        slider_layout.addWidget(self.threshold_value_label)
+        # 减号按钮
+        self.threshold_minus_btn = QToolButton()
+        self.threshold_minus_btn.setText("−")
+        self.threshold_minus_btn.setFixedSize(16, 16)
+        self.threshold_minus_btn.setStyleSheet("""
+            QToolButton {
+                background-color: #34495e;
+                color: #ecf0f1;
+                border: 1px solid #2c3e50;
+                border-radius: 2px;
+                font-size: 13px;
+                font-weight: bold;
+                padding: 0px;
+                margin: 0px;
+            }
+            QToolButton:hover { background-color: #3d566e; }
+            QToolButton:pressed { background-color: #2c3e50; }
+            QToolButton:disabled { background-color: #2c3e50; color: #7f8c8d; }
+        """)
+        self.threshold_minus_btn.clicked.connect(self.on_threshold_minus)
+        slider_layout.addWidget(self.threshold_minus_btn)
+
+        # 数值输入框（可键盘输入）
+        self.threshold_value_edit = QLineEdit("10")
+        self.threshold_value_edit.setFixedWidth(30)
+        self.threshold_value_edit.setAlignment(Qt.AlignCenter)
+        self.threshold_value_edit.setMaxLength(2)
+        self.threshold_value_edit.setStyleSheet("""
+            QLineEdit {
+                background-color: #1e1e1e;
+                color: #3498db;
+                font-weight: bold;
+                border: 1px solid #2c3e50;
+                border-radius: 2px;
+                padding: 0px;
+                font-size: 12px;
+            }
+            QLineEdit:focus { border: 1px solid #3498db; }
+        """)
+        self.threshold_value_edit.returnPressed.connect(self.on_threshold_edit_finished)
+        self.threshold_value_edit.editingFinished.connect(self.on_threshold_edit_finished)
+        slider_layout.addWidget(self.threshold_value_edit)
+
+        # 加号按钮
+        self.threshold_plus_btn = QToolButton()
+        self.threshold_plus_btn.setText("+")
+        self.threshold_plus_btn.setFixedSize(16, 16)
+        self.threshold_plus_btn.setStyleSheet("""
+            QToolButton {
+                background-color: #34495e;
+                color: #ecf0f1;
+                border: 1px solid #2c3e50;
+                border-radius: 2px;
+                font-size: 13px;
+                font-weight: bold;
+                padding: 0px;
+                margin: 0px;
+            }
+            QToolButton:hover { background-color: #3d566e; }
+            QToolButton:pressed { background-color: #2c3e50; }
+            QToolButton:disabled { background-color: #2c3e50; color: #7f8c8d; }
+        """)
+        self.threshold_plus_btn.clicked.connect(self.on_threshold_plus)
+        slider_layout.addWidget(self.threshold_plus_btn)
 
         threshold_layout.addLayout(slider_layout)
 
-        hint_label = QLabel("阈值越小，相似度要求越高（2-25）")
-        hint_label.setFont(QFont("Microsoft YaHei", 9))
-        hint_label.setStyleSheet("color: #999999;")
-        hint_label.setAlignment(Qt.AlignCenter)
-        threshold_layout.addWidget(hint_label)
+        threshold_tip = QLabel("阈值越小，相似度要求越高 (2-25)")
+        threshold_tip.setStyleSheet("color: #7f8c8d; font-size: 11px;")
+        threshold_layout.addWidget(threshold_tip)
 
         layout.addWidget(threshold_group)
 
-        layout.addWidget(self._create_shortcut_group())
-        layout.addWidget(self._create_duplicate_group())
-
-        clear_storage_btn = QPushButton("清除存储占用")
-        clear_storage_btn.clicked.connect(self.clear_storage)
-        clear_storage_btn.setStyleSheet("color: #c0392b;")
-        layout.addWidget(clear_storage_btn)
-
-        layout.addStretch()
-        return panel
-
-    def _create_shortcut_group(self):
-        group = QGroupBox("分类快捷键")
-        layout = QVBoxLayout(group)
+        shortcut_group = QGroupBox("分类快捷键")
+        shortcut_layout = QVBoxLayout(shortcut_group)
 
         self.shortcut_list = QListWidget()
-        layout.addWidget(self.shortcut_list)
+        self.shortcut_list.setMinimumHeight(100)
+        self.shortcut_list.setMaximumHeight(150)
+        self.shortcut_list.setTextElideMode(Qt.ElideRight)
+        self.shortcut_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.shortcut_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.shortcut_list.setFocusPolicy(Qt.NoFocus)
+        shortcut_layout.addWidget(self.shortcut_list)
 
-        add_btn = QPushButton("添加快捷键")
-        add_btn.clicked.connect(self.add_shortcut)
-        layout.addWidget(add_btn)
+        add_shortcut_btn = QPushButton("添加快捷键")
+        add_shortcut_btn.clicked.connect(self.add_shortcut)
+        shortcut_layout.addWidget(add_shortcut_btn)
 
-        remove_btn = QPushButton("删除快捷键")
-        remove_btn.clicked.connect(self.remove_shortcut)
-        layout.addWidget(remove_btn)
+        del_shortcut_btn = QPushButton("删除快捷键")
+        del_shortcut_btn.clicked.connect(self.remove_shortcut)
+        shortcut_layout.addWidget(del_shortcut_btn)
 
-        return group
+        layout.addWidget(shortcut_group)
+
+        duplicate_group = self._create_duplicate_group()
+        layout.addWidget(duplicate_group)
+
+        storage_btn = QPushButton("清除存储占用")
+        storage_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #e74c3c;
+                border-color: #c0392b;
+            }
+            QPushButton:hover {
+                background-color: #c0392b;
+            }
+        """)
+        storage_btn.clicked.connect(self.clear_storage)
+        layout.addWidget(storage_btn)
+
+        return panel
 
     def _create_duplicate_group(self):
         group = QGroupBox("重复图片")
         group.setVisible(True)
         self.duplicate_group = group
         layout = QVBoxLayout(group)
-        layout.setSpacing(8)
-        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setSpacing(6)
+        layout.setContentsMargins(6, 6, 6, 6)
 
-        self.duplicate_table = QTableWidget()
-        self.duplicate_table.setColumnCount(2)
-        self.duplicate_table.horizontalHeader().setVisible(False)
-        self.duplicate_table.verticalHeader().setVisible(False)
-        self.duplicate_table.setShowGrid(False)
-        self.duplicate_table.setSelectionMode(QTableWidget.NoSelection)
-        self.duplicate_table.setAlternatingRowColors(True)
-        self.duplicate_table.setStyleSheet("""
-            QTableWidget {
-                background-color: #2d2d2d;
-                alternate-background-color: #353535;
-                border: none;
+        self.duplicate_list = QListWidget()
+        self.duplicate_list.setMinimumHeight(100)
+        self.duplicate_list.setMaximumHeight(180)
+        self.duplicate_list.setTextElideMode(Qt.ElideRight)
+        self.duplicate_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.duplicate_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.duplicate_list.setFocusPolicy(Qt.NoFocus)
+        self.duplicate_list.setStyleSheet("""
+            QListWidget {
+                background-color: #1e1e1e;
+                border: 1px solid #34495e;
+                border-radius: 3px;
+                color: #ecf0f1;
+                font-size: 13px;
             }
-            QTableWidget::item {
-                padding: 6px;
-                color: #ffffff;
-                border: none;
+            QListWidget::item {
+                padding: 5px 8px;
+                border-bottom: 1px solid #2c3e50;
+                height: 32px;
+            }
+            QListWidget::item:alternate {
+                background-color: #252525;
+            }
+            QListWidget::item:hover {
+                background-color: #34495e;
+            }
+            QListWidget::item:selected {
+                background-color: #34495e;
+                color: #ecf0f1;
             }
         """)
-        self.duplicate_table.cellClicked.connect(self.on_duplicate_table_click)
-        layout.addWidget(self.duplicate_table)
+        self.duplicate_list.itemClicked.connect(self.on_duplicate_item_clicked)
+        layout.addWidget(self.duplicate_list)
 
-        btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(6)
-        
+        # 按钮区：两行布局，每行两个等宽按钮
+        btn_layout = QVBoxLayout()
+        btn_layout.setSpacing(4)
+
+        # 第一行：全选 + 取消
+        row1_layout = QHBoxLayout()
+        row1_layout.setSpacing(4)
+
         select_all_btn = QPushButton("全选")
+        select_all_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         select_all_btn.setStyleSheet("""
             QPushButton {
                 background-color: #3498db;
-                color: white;
-                border: none;
-                padding: 6px 12px;
+                border: 1px solid #2980b9;
                 border-radius: 3px;
+                color: white;
+                padding: 5px 8px;
+                font-size: 12px;
+                font-weight: bold;
             }
             QPushButton:hover {
                 background-color: #2980b9;
             }
+            QPushButton:pressed {
+                background-color: #1a5276;
+            }
         """)
         select_all_btn.clicked.connect(self.select_all_duplicates)
-        btn_layout.addWidget(select_all_btn)
+        row1_layout.addWidget(select_all_btn)
 
-        deselect_all_btn = QPushButton("取消全选")
+        deselect_all_btn = QPushButton("取消")
+        deselect_all_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         deselect_all_btn.setStyleSheet("""
             QPushButton {
                 background-color: #7f8c8d;
-                color: white;
-                border: none;
-                padding: 6px 12px;
+                border: 1px solid #707b7c;
                 border-radius: 3px;
+                color: white;
+                padding: 5px 8px;
+                font-size: 12px;
+                font-weight: bold;
             }
             QPushButton:hover {
                 background-color: #95a5a6;
             }
+            QPushButton:pressed {
+                background-color: #566573;
+            }
         """)
         deselect_all_btn.clicked.connect(self.deselect_all_duplicates)
-        btn_layout.addWidget(deselect_all_btn)
+        row1_layout.addWidget(deselect_all_btn)
 
-        spacer = QWidget()
-        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        btn_layout.addWidget(spacer)
+        btn_layout.addLayout(row1_layout)
 
-        view_btn = QPushButton("查看详情")
+        # 第二行：查看 + 删除
+        row2_layout = QHBoxLayout()
+        row2_layout.setSpacing(4)
+
+        view_btn = QPushButton("查看")
+        view_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         view_btn.setStyleSheet("""
             QPushButton {
                 background-color: #9b59b6;
-                color: white;
-                border: none;
-                padding: 6px 12px;
+                border: 1px solid #8e44ad;
                 border-radius: 3px;
+                color: white;
+                padding: 5px 8px;
+                font-size: 12px;
+                font-weight: bold;
             }
             QPushButton:hover {
                 background-color: #8e44ad;
             }
+            QPushButton:pressed {
+                background-color: #6c3483;
+            }
         """)
         view_btn.clicked.connect(self.show_duplicate_detail)
-        btn_layout.addWidget(view_btn)
+        row2_layout.addWidget(view_btn)
 
-        delete_btn = QPushButton("删除选中")
+        delete_btn = QPushButton("删除")
+        delete_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         delete_btn.setStyleSheet("""
             QPushButton {
                 background-color: #e74c3c;
-                color: white;
-                border: none;
-                padding: 6px 12px;
+                border: 1px solid #c0392b;
                 border-radius: 3px;
+                color: white;
+                padding: 5px 8px;
+                font-size: 12px;
+                font-weight: bold;
             }
             QPushButton:hover {
                 background-color: #c0392b;
             }
+            QPushButton:pressed {
+                background-color: #922b21;
+            }
         """)
         delete_btn.clicked.connect(self.delete_selected_duplicates)
-        btn_layout.addWidget(delete_btn)
+        row2_layout.addWidget(delete_btn)
+
+        btn_layout.addLayout(row2_layout)
 
         layout.addLayout(btn_layout)
         return group
@@ -261,187 +455,447 @@ class MainWindow(QMainWindow):
     def _create_right_panel(self):
         panel = QWidget()
         layout = QVBoxLayout(panel)
-
-        image_container = QWidget()
-        image_layout = QHBoxLayout(image_container)
-
-        self.scroll_area = QScrollArea()
-        self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setAlignment(Qt.AlignCenter)
+        layout.setSpacing(12)
 
         self.image_label = QLabel()
         self.image_label.setAlignment(Qt.AlignCenter)
-        self.image_label.setStyleSheet("background-color: #2a2a2a;")
-        self.scroll_area.setWidget(self.image_label)
-
-        image_layout.addWidget(self.scroll_area)
-        layout.addWidget(image_container)
+        self.image_label.setStyleSheet("""
+            QLabel {
+                background-color: #1a1a1a;
+                border: 2px solid #34495e;
+                border-radius: 6px;
+            }
+        """)
+        self.image_label.setMinimumHeight(300)
+        layout.addWidget(self.image_label, 1)
 
         info_layout = QHBoxLayout()
-        self.group_info = QLabel("组: 0/0")
-        info_layout.addWidget(self.group_info)
+        info_layout.setSpacing(16)
+        info_layout.setContentsMargins(4, 0, 4, 0)
 
-        self.image_info = QLabel("图片: 0/0")
-        info_layout.addWidget(self.image_info)
+        self.group_info_label = QLabel("组: /")
+        self.group_info_label.setStyleSheet("color: #3498db; font-weight: bold; font-size: 13px;")
+        info_layout.addWidget(self.group_info_label)
 
-        self.path_label = QLabel("")
-        self.path_label.setWordWrap(True)
-        info_layout.addWidget(self.path_label)
+        self.image_info_label = QLabel("图片: /")
+        self.image_info_label.setStyleSheet("color: #9b59b6; font-weight: bold; font-size: 13px;")
+        info_layout.addWidget(self.image_info_label)
+
+        self.path_label = QLineEdit()
+        self.path_label.setStyleSheet("""
+            QLineEdit {
+                background-color: transparent;
+                color: #7f8c8d;
+                font-size: 12px;
+                border: none;
+                border-bottom: 1px solid transparent;
+                padding: 0px;
+            }
+            QLineEdit:hover {
+                border-bottom: 1px solid #34495e;
+            }
+            QLineEdit:focus {
+                border-bottom: 1px solid #3498db;
+                color: #ecf0f1;
+                background-color: #1e1e1e;
+            }
+        """)
+        self.path_label.setReadOnly(False)
+        self.path_label.setCursorPosition(0)
+        self.path_label.returnPressed.connect(self.on_filename_edited)
+        self.path_label.editingFinished.connect(self.on_filename_editing_finished)
+        info_layout.addWidget(self.path_label, 1)
 
         layout.addLayout(info_layout)
-        layout.addLayout(self._create_navigation_layout())
+
+        nav_layout = self._create_navigation_layout()
+        layout.addLayout(nav_layout)
 
         return panel
 
     def _create_navigation_layout(self):
         layout = QVBoxLayout()
+        layout.setSpacing(8)
 
         view_layout = QHBoxLayout()
+        view_layout.setSpacing(6)
+
         rotate_180_ccw_btn = QPushButton("↻ 180°逆 (Ctrl+↑)")
         rotate_180_ccw_btn.clicked.connect(lambda: self.rotate_image(False, 180))
+        rotate_180_ccw_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #34495e;
+                border: 1px solid #2c3e50;
+                border-radius: 5px;
+                padding: 7px 10px;
+                font-size: 12px;
+                color: #ecf0f1;
+            }
+            QPushButton:hover {
+                background-color: #3d566e;
+            }
+            QPushButton:pressed {
+                background-color: #2c3e50;
+            }
+        """)
         view_layout.addWidget(rotate_180_ccw_btn)
 
         rotate_ccw_btn = QPushButton("↻ 90°逆 (Ctrl+←)")
         rotate_ccw_btn.clicked.connect(lambda: self.rotate_image(False))
+        rotate_ccw_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #34495e;
+                border: 1px solid #2c3e50;
+                border-radius: 5px;
+                padding: 7px 10px;
+                font-size: 12px;
+                color: #ecf0f1;
+            }
+            QPushButton:hover {
+                background-color: #3d566e;
+            }
+            QPushButton:pressed {
+                background-color: #2c3e50;
+            }
+        """)
         view_layout.addWidget(rotate_ccw_btn)
 
         rotate_cw_btn = QPushButton("↺ 90°顺 (Ctrl+→)")
         rotate_cw_btn.clicked.connect(lambda: self.rotate_image(True))
+        rotate_cw_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #34495e;
+                border: 1px solid #2c3e50;
+                border-radius: 5px;
+                padding: 7px 10px;
+                font-size: 12px;
+                color: #ecf0f1;
+            }
+            QPushButton:hover {
+                background-color: #3d566e;
+            }
+            QPushButton:pressed {
+                background-color: #2c3e50;
+            }
+        """)
         view_layout.addWidget(rotate_cw_btn)
 
         rotate_180_cw_btn = QPushButton("↺ 180°顺 (Ctrl+↓)")
         rotate_180_cw_btn.clicked.connect(lambda: self.rotate_image(True, 180))
+        rotate_180_cw_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #34495e;
+                border: 1px solid #2c3e50;
+                border-radius: 5px;
+                padding: 7px 10px;
+                font-size: 12px;
+                color: #ecf0f1;
+            }
+            QPushButton:hover {
+                background-color: #3d566e;
+            }
+            QPushButton:pressed {
+                background-color: #2c3e50;
+            }
+        """)
         view_layout.addWidget(rotate_180_cw_btn)
+
         layout.addLayout(view_layout)
 
         switch_layout = QHBoxLayout()
+        switch_layout.setSpacing(6)
+
         prev_group_btn = QPushButton("上一组 (↑)")
         prev_group_btn.setShortcut("Up")
         prev_group_btn.clicked.connect(self.prev_group)
+        prev_group_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #27ae60;
+                border: 1px solid #1e8449;
+                border-radius: 5px;
+                padding: 7px 10px;
+                font-size: 12px;
+                color: #ffffff;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #2ecc71;
+            }
+            QPushButton:pressed {
+                background-color: #1e8449;
+            }
+        """)
         switch_layout.addWidget(prev_group_btn)
 
         prev_img_btn = QPushButton("上一张 (←)")
         prev_img_btn.setShortcut("Left")
         prev_img_btn.clicked.connect(self.prev_image)
+        prev_img_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #27ae60;
+                border: 1px solid #1e8449;
+                border-radius: 5px;
+                padding: 7px 10px;
+                font-size: 12px;
+                color: #ffffff;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #2ecc71;
+            }
+            QPushButton:pressed {
+                background-color: #1e8449;
+            }
+        """)
         switch_layout.addWidget(prev_img_btn)
 
         next_img_btn = QPushButton("下一张 (→)")
         next_img_btn.setShortcut("Right")
         next_img_btn.clicked.connect(self.next_image)
+        next_img_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #27ae60;
+                border: 1px solid #1e8449;
+                border-radius: 5px;
+                padding: 7px 10px;
+                font-size: 12px;
+                color: #ffffff;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #2ecc71;
+            }
+            QPushButton:pressed {
+                background-color: #1e8449;
+            }
+        """)
         switch_layout.addWidget(next_img_btn)
 
         next_group_btn = QPushButton("下一组 (↓)")
         next_group_btn.setShortcut("Down")
         next_group_btn.clicked.connect(self.next_group)
+        next_group_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #27ae60;
+                border: 1px solid #1e8449;
+                border-radius: 5px;
+                padding: 7px 10px;
+                font-size: 12px;
+                color: #ffffff;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #2ecc71;
+            }
+            QPushButton:pressed {
+                background-color: #1e8449;
+            }
+        """)
         switch_layout.addWidget(next_group_btn)
+
         layout.addLayout(switch_layout)
 
         return layout
 
     def connect_signals(self):
-        self.classification_service.classification_progress.connect(self.on_classification_progress)
-        self.classification_service.classification_complete.connect(self.on_classification_complete)
-        self.classification_service.image_moved.connect(self.on_image_moved)
-        self.classification_service.group_changed.connect(self.on_group_changed)
+        self.recent_combo.currentIndexChanged.connect(self.on_recent_folder_selected)
 
-        self.duplicate_service.duplicate_deleted.connect(self.on_duplicate_deleted)
-        self.duplicate_service.duplicate_processing.connect(self.on_duplicate_processing)
-        self.duplicate_service.duplicate_all_processed.connect(self.on_duplicate_all_processed)
-        self.duplicate_service.duplicate_memory_cleared.connect(self.on_duplicate_memory_cleared)
-        
-        self.installEventFilter(self)
-        self.centralWidget().installEventFilter(self)
-        
         self.shortcut_rotate_ccw = QShortcut(QKeySequence("Ctrl+Left"), self)
         self.shortcut_rotate_ccw.setContext(Qt.ApplicationShortcut)
         self.shortcut_rotate_ccw.activated.connect(lambda: self.rotate_image(False))
-        debug_manager.log_info('注册快捷键 Ctrl+Left', 'keyboard', shortcut='rotate_image(False)', context='ApplicationShortcut')
-        
+
         self.shortcut_rotate_cw = QShortcut(QKeySequence("Ctrl+Right"), self)
         self.shortcut_rotate_cw.setContext(Qt.ApplicationShortcut)
         self.shortcut_rotate_cw.activated.connect(lambda: self.rotate_image(True))
-        debug_manager.log_info('注册快捷键 Ctrl+Right', 'keyboard', shortcut='rotate_image(True)', context='ApplicationShortcut')
-        
+
         self.shortcut_rotate_180_ccw = QShortcut(QKeySequence("Ctrl+Up"), self)
         self.shortcut_rotate_180_ccw.setContext(Qt.ApplicationShortcut)
         self.shortcut_rotate_180_ccw.activated.connect(lambda: self.rotate_image(False, 180))
-        debug_manager.log_info('注册快捷键 Ctrl+Up', 'keyboard', shortcut='rotate_image(False, 180)', context='ApplicationShortcut')
-        
+
         self.shortcut_rotate_180_cw = QShortcut(QKeySequence("Ctrl+Down"), self)
         self.shortcut_rotate_180_cw.setContext(Qt.ApplicationShortcut)
         self.shortcut_rotate_180_cw.activated.connect(lambda: self.rotate_image(True, 180))
-        debug_manager.log_info('注册快捷键 Ctrl+Down', 'keyboard', shortcut='rotate_image(True, 180)', context='ApplicationShortcut')
-    
-    def eventFilter(self, obj, event):
-        if event.type() == event.KeyPress:
-            key = event.key()
-            modifiers = event.modifiers()
-            has_ctrl = bool(modifiers & Qt.ControlModifier)
-            is_left = key == Qt.Key_Left
-            is_right = key == Qt.Key_Right
-            is_ctrl_key = key == Qt.Key_Control
-            debug_manager.log_info('事件过滤器捕获键盘事件', 'keyboard', key=key, modifiers=modifiers, has_ctrl=has_ctrl, is_left=is_left, is_right=is_right, is_ctrl_key=is_ctrl_key, obj=type(obj).__name__)
-            
-            if is_ctrl_key:
-                debug_manager.log_info('事件过滤器: 仅按下Ctrl键，不处理', 'keyboard')
-                return False
-                
-            if has_ctrl:
-                if is_left:
-                    debug_manager.log_info('事件过滤器: Ctrl+Left -> 调用rotate_image(False)', 'keyboard')
-                    self.rotate_image(False)
-                    return True
-                elif is_right:
-                    debug_manager.log_info('事件过滤器: Ctrl+Right -> 调用rotate_image(True)', 'keyboard')
-                    self.rotate_image(True)
-                    return True
-            else:
-                debug_manager.log_info('事件过滤器: 无Ctrl修饰键，事件继续传递', 'keyboard')
-        return super().eventFilter(obj, event)
 
-    def load_shortcuts(self):
+    def keyPressEvent(self, event: QKeyEvent):
+        """捕获按键，匹配快捷键映射触发分类。
+
+        当文件名输入框或阈值输入框有焦点时不拦截，保证正常编辑。
+        修饰键单独按下（Ctrl/Shift/Alt）不触发分类。
+        """
+        # 输入框聚焦时放行，避免编辑文件名/阈值时误触发分类
+        if self.path_label.hasFocus() or self.threshold_value_edit.hasFocus():
+            super().keyPressEvent(event)
+            return
+
+        key = event.key()
+        # 忽略纯修饰键
+        if key in (Qt.Key_Control, Qt.Key_Shift, Qt.Key_Alt, Qt.Key_Meta):
+            super().keyPressEvent(event)
+            return
+
+        key_str = key_to_string(key)
+        if not key_str:
+            super().keyPressEvent(event)
+            return
+
+        key_str = key_str.lower()
+        shortcuts = self.presenter.get_shortcuts()
+        if key_str in shortcuts:
+            debug_manager.log_info('快捷键触发分类', 'shortcut', key=key_str)
+            self.presenter.classify_image(key_str)
+            event.accept()
+        else:
+            super().keyPressEvent(event)
+
+    def show_current_image(self):
+        current_path = self.presenter.get_current_image_path()
+        if not current_path or not os.path.exists(current_path):
+            self.image_label.clear()
+            self.group_info_label.setText("组: /")
+            self.image_info_label.setText("图片: /")
+            self.path_label.setText("")
+            return
+
+        total_groups = self.presenter.get_total_groups()
+        current_group_index = self.presenter.get_current_group_index()
+        current_image_index = self.presenter.get_current_image_index()
+        current_group_size = self.presenter.get_current_group_size()
+
+        self.group_info_label.setText(f"组: {current_group_index + 1}/{total_groups}")
+        self.image_info_label.setText(f"图片: {current_image_index + 1}/{current_group_size}")
+
+        # 仅显示文件名；用户正在编辑时不覆盖
+        filename = os.path.basename(current_path)
+        if not self.path_label.hasFocus():
+            self.path_label.setText(filename)
+            self.path_label.setCursorPosition(0)
+
+        try:
+            # 从 LRU 缓存读取原图，避免重复磁盘解码
+            if current_path in self._image_cache:
+                pixmap = self._image_cache.pop(current_path)
+                self._image_cache[current_path] = pixmap
+            else:
+                pixmap = QPixmap(current_path)
+                if pixmap.isNull():
+                    self.image_label.setText("无法加载图片")
+                    return
+                # 缓存原图
+                self._image_cache[current_path] = pixmap
+                if len(self._image_cache) > self._image_cache_max:
+                    self._image_cache.popitem(last=False)
+
+            rotation = self.presenter.get_current_rotation()
+            if rotation != 0:
+                transform = QTransform()
+                transform.rotate(rotation)
+                pixmap = pixmap.transformed(transform, Qt.SmoothTransformation)
+
+            display_size = self.image_label.size() - QSize(40, 40)
+            scaled_pixmap = pixmap.scaled(display_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.image_label.setPixmap(scaled_pixmap)
+        except Exception as e:
+            debug_manager.log_exception('加载图片失败', 'image', error=e)
+            self.image_label.setText(f"加载失败: {str(e)}")
+
+    def on_filename_edited(self):
+        """用户在文件名输入框按 Enter 时触发重命名。"""
+        new_filename = self.path_label.text().strip()
+        if not new_filename:
+            # 空文件名：恢复原文件名
+            current_path = self.presenter.get_current_image_path()
+            if current_path:
+                self.path_label.setText(os.path.basename(current_path))
+            return
+        success, message = self.presenter.rename_current_image(new_filename)
+        if success:
+            self.set_status(f"已重命名: {message}")
+            # 重命名成功后光标移到开头
+            self.path_label.setCursorPosition(0)
+            # 清除焦点，确保后续快捷键能正常触发
+            self.path_label.clearFocus()
+        else:
+            self.set_status(f"重命名失败: {message}")
+            # 失败时恢复原文件名
+            current_path = self.presenter.get_current_image_path()
+            if current_path:
+                self.path_label.setText(os.path.basename(current_path))
+
+    def on_filename_editing_finished(self):
+        """文件名输入框失去焦点时：若内容未变则什么都不做。
+
+        实际重命名仅在 Enter 时触发（on_filename_edited），
+        避免点击其他地方时意外触发重命名。
+        """
+        current_path = self.presenter.get_current_image_path()
+        if not current_path:
+            return
+        current_filename = os.path.basename(current_path)
+        if self.path_label.text() != current_filename:
+            # 内容有变化但用户没按 Enter，提示一下但不自动执行
+            # 将光标移到开头便于查看完整文件名
+            self.path_label.setCursorPosition(0)
+
+    def update_shortcuts(self, shortcuts: dict):
         self.shortcut_list.clear()
-        shortcuts = self.classifier.get_all_shortcuts()
         for key, path in shortcuts.items():
             item = QListWidgetItem(f"{key} -> {os.path.basename(path)}")
             item.setData(Qt.UserRole, key)
             self.shortcut_list.addItem(item)
 
-    def update_recent_folders(self):
+    def update_recent_folders(self, recent_folders: list):
         self.recent_combo.clear()
         self.recent_combo.addItem("选择最近的文件夹", "")
-
-        recent_folders = self.classifier.get_recent_folders()
         for folder in recent_folders:
             folder_name = os.path.basename(folder) or folder
             self.recent_combo.addItem(folder_name, folder)
 
-    def on_recent_folder_selected(self, index: int):
-        if index == 0:
-            return
+    def update_duplicate_list(self, duplicates: dict):
+        self.duplicate_list.clear()
+        for md5, paths in duplicates.items():
+            filename = os.path.basename(paths[0])
+            if len(filename) > 25:
+                filename = filename[:22] + "..."
+            
+            item = QListWidgetItem(f"重复 ({len(paths)}张): {filename}")
+            item.setData(Qt.UserRole, (md5, paths))
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Unchecked)
+            self.duplicate_list.addItem(item)
+        
+        if not duplicates:
+            item = QListWidgetItem("暂无重复图片")
+            item.setFlags(item.flags() & ~Qt.ItemIsSelectable & ~Qt.ItemIsEnabled)
+            item.setForeground(QColor("#7f8c8d"))
+            self.duplicate_list.addItem(item)
 
-        folder_path = self.recent_combo.itemData(index)
-        if folder_path and os.path.exists(folder_path):
-            self._start_scanning(folder_path)
-        elif folder_path:
-            debug_manager.log_warning('最近文件夹不存在', 'folder', folder_path=folder_path)
-            QMessageBox.warning(self, "警告", f"文件夹不存在: {folder_path}")
-            self.update_recent_folders()
+    def update_threshold(self, threshold: int):
+        # 程序设置阈值时阻塞信号，避免触发 on_threshold_changed 防抖流程
+        self.threshold_slider.blockSignals(True)
+        self.threshold_slider.setValue(threshold)
+        self.threshold_slider.blockSignals(False)
+        self.threshold_value_edit.setText(str(threshold))
 
-    def check_unfinished_session(self):
-        session = self.classifier.get_unfinished_session()
-        if not session:
-            return
+    def set_status(self, text: str):
+        self.status_label.setText(text)
 
-        folder_path = session.get('folder_path', "")
-        total_count = session.get('total_count', 0)
-        processed_count = session.get('processed_count', 0)
+    def show_info_message(self, message: str):
+        QMessageBox.information(self, "提示", message)
 
-        if total_count == 0:
-            return
+    def show_warning_message(self, message: str):
+        QMessageBox.warning(self, "警告", message)
 
-        remaining = total_count - processed_count
+    def show_error_message(self, message: str):
+        QMessageBox.critical(self, "错误", message)
 
+    def show_folder_dialog(self, callback):
+        dialog = FolderSelectDialog(self)
+        if dialog.exec_() == QDialog.Accepted:
+            callback(dialog.get_selected_path())
+        else:
+            callback("")
+
+    def show_unfinished_session_dialog(self, folder_path, total_count, processed_count, remaining, continue_callback, cancel_callback):
         reply = QMessageBox.question(
             self,
             "未完成的分类",
@@ -455,533 +909,34 @@ class MainWindow(QMainWindow):
         )
 
         if reply == QMessageBox.Yes:
-            self._start_scanning(folder_path)
+            continue_callback(folder_path)
         else:
-            self.classifier.clear_unfinished_session()
+            cancel_callback()
 
-    def select_folder(self):
-        folder_path = QFileDialog.getExistingDirectory(self, "选择图片文件夹")
-        if not folder_path:
-            debug_manager.log_info('用户取消选择文件夹', 'folder')
-            return
+    def show_hash_analysis_dialog(self, hash_service,
+                                  progress_callback, finished_callback,
+                                  canceled_callback, error_callback, threshold_callback):
+        """打开哈希分析对话框。
 
-        debug_manager.log_info('用户选择文件夹', 'folder', folder_path=folder_path)
-        self._start_scanning(folder_path)
-
-    def _start_scanning(self, folder_path: str):
-        self.status_label.setText("正在扫描图片...")
-        self.threshold_group.setVisible(False)
-        self.hash_list = []
-
-        self.scan_thread = ScanThread(folder_path)
-        self.scan_thread.progress_updated.connect(self.update_scan_progress)
-        self.scan_thread.scanning_finished.connect(self.on_scan_finished)
-        self.scan_thread.error_occurred.connect(self.on_scan_error)
-        self.scan_thread.start()
-
-    def update_scan_progress(self, current: int, total: int):
-        self.status_label.setText(f"正在扫描: {current}/{total}")
-
-    def on_scan_finished(self, image_paths: list):
-        debug_manager.log_info('扫描完成', 'scan', image_count=len(image_paths))
-
-        folder_path = self.scan_thread.folder_path
-        self._post_scan_setup(folder_path, image_paths)
-
-        if not image_paths:
-            self.status_label.setText("未找到图片")
-            return
-
-        self.show_current_image()
-        self.status_label.setText(f"扫描完成，共 {len(image_paths)} 张图片")
-
-        files_changed, changed_files = self.classifier.check_files_changed(image_paths)
-        if files_changed:
-            debug_manager.log_info('文件有变化，开始哈希分析', 'hash', changed_count=len(changed_files))
-            self._start_hash_analysis(image_paths)
-        else:
-            debug_manager.log_info('文件无变化，跳过哈希分析', 'hash')
-            self.hash_completed = True
-            self._load_cached_hash_results(image_paths)
-
-    def _post_scan_setup(self, folder_path: str, image_paths: list):
-        self.classifier.load_config(folder_path)
-        self.classifier.load_duplicate_memory()
-        self.load_shortcuts()
-        self.update_recent_folders()
-        self.classification_service.set_groups([[path] for path in image_paths])
-        self.group_rotations = {}
-        debug_manager.log_info('新文件夹加载，重置组旋转状态', 'rotation')
-
-    def _start_hash_analysis(self, image_paths: list):
-        self.hash_scanning = True
-        self.hash_completed = False
-
-        threshold = self.classifier.get_hash_threshold()
-        debug_manager.log_info('启动哈希分析对话框', 'hash', image_count=len(image_paths), threshold=threshold)
-        
-        cache = self.classifier.load_hash_cache()
-        cached_file_hashes = cache.get('file_hashes', {})
-        debug_manager.log_info('加载缓存文件哈希', 'hash', cached_count=len(cached_file_hashes))
-        
-        self.hash_dialog = HashAnalysisDialog(image_paths, threshold, self)
-        self.hash_dialog.set_cached_hashes(cached_file_hashes)
-        self.hash_dialog.progress_updated_signal.connect(self.on_hash_progress_update)
-        self.hash_dialog.analysis_finished_signal.connect(self.on_hash_finished)
-        self.hash_dialog.analysis_canceled_signal.connect(self.on_hash_canceled)
-        self.hash_dialog.analysis_error_signal.connect(self.on_hash_error)
-        self.hash_dialog.analysis_stage_changed_signal.connect(self.on_hash_stage_changed)
-        self.hash_dialog.analysis_file_processed_signal.connect(self.on_hash_file_processed)
-        self.hash_dialog.threshold_changed.connect(self.on_hash_threshold_changed)
+        传入 total_count 和 initial_threshold 替代让对话框直接读取 service 属性；
+        连接 cancel_requested 信号到 service.cancel，使取消操作通过信号链传递。
+        """
+        total_count = len(hash_service.image_paths) if hasattr(hash_service, 'image_paths') else 0
+        initial_threshold = hash_service.threshold
+        self.hash_dialog = HashAnalysisDialog(hash_service, total_count, initial_threshold, self)
+        self.hash_dialog.progress_updated_signal.connect(progress_callback)
+        self.hash_dialog.analysis_finished_signal.connect(finished_callback)
+        self.hash_dialog.analysis_canceled_signal.connect(canceled_callback)
+        self.hash_dialog.analysis_error_signal.connect(error_callback)
+        self.hash_dialog.threshold_changed.connect(threshold_callback)
+        self.hash_dialog.cancel_requested.connect(hash_service.cancel)
         self.hash_dialog.show()
 
-    def on_hash_progress_update(self, current: int, total: int, stage: str, filename: str, processed_count: int, stage_progress: int = 0):
-        self.status_label.setText(f"后台分析相似度: {stage} ({current}/{total})")
-    
-    def on_hash_threshold_changed(self, threshold: int):
-        debug_manager.log_info('用户调整哈希阈值', 'hash', threshold=threshold)
-        self.classifier.set_hash_threshold(threshold)
-        self.threshold_slider.setValue(threshold)
-        self.threshold_value_label.setText(str(threshold))
-
-    def on_threshold_changed(self, threshold: int):
-        debug_manager.log_info('主窗口阈值变化', 'hash', threshold=threshold)
-        self.threshold_value_label.setText(str(threshold))
-        self.classifier.set_hash_threshold(threshold)
-        
-        if self.hash_completed and self.hash_list:
-            debug_manager.log_info('重新分组', 'hash', threshold=threshold, hash_count=len(self.hash_list))
-            from services.hash_analysis_service import HashAnalysisService
-            groups = HashAnalysisService.group_by_similarity(self.hash_list, threshold)
-            
-            current_groups = self.classification_service.get_groups()
-            processed_images = self.classification_service.processed_images
-            
-            if not groups:
-                filtered_groups = current_groups
-            else:
-                filtered_groups = []
-                similar_images = set()
-                for group in groups:
-                    filtered_group = [path for path in group if path not in processed_images]
-                    if filtered_group:
-                        filtered_groups.append(filtered_group)
-                        similar_images.update(filtered_group)
-                
-                for group in current_groups:
-                    for path in group:
-                        if path not in similar_images and path not in processed_images:
-                            filtered_groups.append([path])
-            
-            self.classification_service.set_groups(filtered_groups)
-            
-            all_image_paths = []
-            for group in filtered_groups:
-                all_image_paths.extend(group)
-            cache = self.classifier.create_file_cache(all_image_paths)
-            cache['duplicates'] = self.duplicate_service.get_duplicates()
-            cache['similar_groups'] = groups
-            cache['hash_list'] = self.hash_list
-            self.classifier.save_hash_cache(cache)
-            
-            self.show_current_image()
-            self.update_duplicate_list()
-            self._update_hash_status(groups, self.duplicate_service.get_duplicates())
-
-    def on_hash_canceled(self):
-        self.hash_scanning = False
-        self.status_label.setText("哈希分析已取消")
-        debug_manager.log_info('哈希分析已取消', 'hash')
-
-    def on_hash_stage_changed(self, stage: str, current: int, total: int):
-        debug_manager.log_info('哈希分析阶段变更', 'hash', stage=stage, current=current, total=total)
-
-    def on_hash_file_processed(self, filename: str, current: int, total: int):
-        debug_manager.log_info('哈希分析文件处理', 'hash', filename=filename, current=current, total=total)
-
-    def on_hash_finished(self, groups: list, duplicates: dict, hash_list: list = None):
-        debug_manager.log_info('哈希分析完成', 'hash', group_count=len(groups), duplicate_groups=len(duplicates))
-        self.hash_scanning = False
-        self.hash_completed = True
-        
-        if hash_list:
-            self.hash_list = hash_list
-            debug_manager.log_info('保存哈希列表', 'hash', hash_count=len(hash_list))
-
-        current_groups = self.classification_service.get_groups()
-        processed_images = self.classification_service.processed_images
-        
-        if not groups:
-            debug_manager.log_info('未找到相似图片，保留原始分组', 'hash', original_group_count=len(current_groups))
-            filtered_groups = current_groups
-        else:
-            filtered_groups = []
-            similar_images = set()
-            for group in groups:
-                filtered_group = [path for path in group if path not in processed_images]
-                if filtered_group:
-                    filtered_groups.append(filtered_group)
-                    similar_images.update(filtered_group)
-            
-            for group in current_groups:
-                for path in group:
-                    if path not in similar_images and path not in processed_images:
-                        filtered_groups.append([path])
-        
-        debug_manager.log_info('最终分组', 'hash', final_group_count=len(filtered_groups))
-        self.classification_service.set_groups(filtered_groups)
-        self.duplicate_service.set_duplicates(duplicates)
-
-        all_image_paths = []
-        for group in filtered_groups:
-            all_image_paths.extend(group)
-        cache = self.classifier.create_file_cache(all_image_paths)
-        cache['duplicates'] = duplicates
-        cache['similar_groups'] = groups
-        
-        if hash_list:
-            cache['hash_list'] = hash_list
-            file_hashes = {}
-            for path, img_hash in hash_list:
-                file_hashes[path] = {'img_hash': img_hash}
-            cache['file_hashes'] = file_hashes
-        
-        md5_hash_map = {}
-        for md5, paths in duplicates.items():
-            for path in paths:
-                if path not in md5_hash_map:
-                    md5_hash_map[path] = md5
-        if md5_hash_map:
-            if 'file_hashes' not in cache:
-                cache['file_hashes'] = {}
-            for path, md5 in md5_hash_map.items():
-                if path not in cache['file_hashes']:
-                    cache['file_hashes'][path] = {}
-                cache['file_hashes'][path]['md5'] = md5
-        
-        debug_manager.log_info('保存哈希缓存', 'hash', file_hashes_count=len(cache.get('file_hashes', {})))
-        self.classifier.save_hash_cache(cache)
-
-        self.threshold_group.setVisible(True)
-        self.show_current_image()
-        self.update_duplicate_list()
-        self._update_hash_status(groups, duplicates)
-
-    def _filter_processed_images(self, groups: list) -> list:
-        processed_images = self.classification_service.processed_images
-        filtered_groups = []
-        for group in groups:
-            filtered_group = [path for path in group if path not in processed_images]
-            if filtered_group:
-                filtered_groups.append(filtered_group)
-        return filtered_groups
-
-    def _load_cached_hash_results(self, image_paths: list):
-        debug_manager.log_info('加载缓存的哈希结果', 'hash')
-        self.status_label.setText("文件无变化，使用缓存结果")
-        
-        cache = self.classifier.load_hash_cache()
-        similar_groups = cache.get('similar_groups', [])
-        duplicates = cache.get('duplicates', {})
-        hash_list = cache.get('hash_list', [])
-        
-        if hash_list:
-            self.hash_list = hash_list
-            self.hash_completed = True
-            debug_manager.log_info('加载缓存的哈希列表', 'hash', hash_count=len(hash_list))
-        
-        current_groups = self.classification_service.get_groups()
-        processed_images = self.classification_service.processed_images
-        
-        if similar_groups:
-            filtered_groups = []
-            similar_images = set()
-            for group in similar_groups:
-                filtered_group = [path for path in group if path not in processed_images]
-                if filtered_group:
-                    filtered_groups.append(filtered_group)
-                    similar_images.update(filtered_group)
-            
-            for group in current_groups:
-                for path in group:
-                    if path not in similar_images and path not in processed_images:
-                        filtered_groups.append([path])
-            
-            self.classification_service.set_groups(filtered_groups)
-            debug_manager.log_info('缓存相似分组加载完成', 'hash', group_count=len(filtered_groups))
-        elif current_groups:
-            self.classification_service.set_groups(current_groups)
-        
-        self.duplicate_service.set_duplicates(duplicates)
-        
-        if self.hash_completed and self.hash_list:
-            self.threshold_group.setVisible(True)
-        
-        self.show_current_image()
-        self.update_duplicate_list()
-        
-        remaining_duplicates = self.duplicate_service.get_duplicates()
-        if remaining_duplicates:
-            total_duplicates = sum(len(p) - 1 for p in remaining_duplicates.values())
-            self.status_label.setText(f"使用缓存: {len(self.classification_service.get_groups())}组, {len(remaining_duplicates)}组重复({total_duplicates}张)")
-        else:
-            self.status_label.setText(f"使用缓存，共 {len(self.classification_service.get_groups())} 组")
-
-    def _update_hash_status(self, groups: list, duplicates: dict):
-        remaining_duplicates = self.duplicate_service.get_duplicates()
-
-        if remaining_duplicates:
-            total_duplicates = sum(len(p) - 1 for p in remaining_duplicates.values())
-            processed_count = len(duplicates) - len(remaining_duplicates)
-            if processed_count > 0:
-                self.status_label.setText(f"分析完成: {len(groups)}组, {len(remaining_duplicates)}组重复({total_duplicates}张), {processed_count}组已处理")
-            else:
-                self.status_label.setText(f"分析完成: {len(groups)}组, {len(remaining_duplicates)}组重复({total_duplicates}张)")
-        else:
-            self.status_label.setText(f"分析完成，共 {len(groups)} 组")
-
-    def on_hash_error(self, error: str):
-        self.hash_scanning = False
-        self.status_label.setText("相似度分析出错")
-        debug_manager.log_error('哈希分析出错', 'hash', error=error)
-        QMessageBox.warning(self, "警告", f"后台分析时出错: {error}")
-
-    def on_classification_progress(self, processed: int, total: int, message: str):
-        self.status_label.setText(message)
-        debug_manager.log_info('分类进度更新', 'classification', processed=processed, total=total)
-
-    def on_classification_complete(self):
-        self.status_label.setText("分类完成！")
-        self.classifier.clear_unfinished_session()
-        debug_manager.log_info('分类全部完成', 'classification')
-
-    def on_image_moved(self, path: str, folder_name: str, success: bool):
-        filename = os.path.basename(path)
-        if success:
-            debug_manager.log_info('图片移动成功', 'classification', filename=filename, folder=folder_name)
-        else:
-            debug_manager.log_warning('图片移动失败', 'classification', filename=filename)
-
-    def on_group_changed(self, group_idx: int, total_groups: int, image_idx: int, total_images: int):
-        self.group_info.setText(f"组: {group_idx + 1}/{total_groups}")
-        self.image_info.setText(f"图片: {image_idx + 1}/{total_images}")
-        debug_manager.log_info('分组切换', 'classification', group=group_idx + 1, total_groups=total_groups)
-
-    def on_duplicate_deleted(self, md5_hash: str, deleted_count: int, remaining_count: int):
-        debug_manager.log_info('重复图片删除', 'duplicate', deleted_count=deleted_count, remaining_count=remaining_count)
-
-    def on_duplicate_processing(self, current: int, total: int):
-        self.status_label.setText(f"正在删除重复图片: {current}/{total}")
-        debug_manager.log_info('重复图片处理中', 'duplicate', current=current, total=total)
-
-    def on_duplicate_all_processed(self):
-        self.status_label.setText("所有重复图片已处理完成")
-        self.duplicate_service.clear_all_duplicate_memory()
-        debug_manager.log_info('重复图片全部处理完成', 'duplicate')
-
-    def on_duplicate_memory_cleared(self):
-        debug_manager.log_info('重复图片记忆已清除', 'duplicate')
-
-    def on_scan_error(self, error: str):
-        self.status_label.setText("扫描出错")
-        debug_manager.log_error('扫描出错', 'scan', error=error)
-        QMessageBox.critical(self, "错误", f"扫描图片时出错: {error}")
-
-    def show_current_image(self):
-        groups = self.classification_service.get_groups()
-        current_group_index = self.classification_service.get_current_group_index()
-
-        if not groups or current_group_index >= len(groups):
-            debug_manager.log_info('没有图片组', 'image')
-            self._clear_image_display()
-            return
-
-        current_group = groups[current_group_index]
-        current_image_index = self.classification_service.get_current_image_index()
-
-        if current_image_index >= len(current_group):
-            current_image_index = 0
-
-        image_path = current_group[current_image_index]
-
-        current_group_index = self.classification_service.get_current_group_index() if hasattr(self.classification_service, 'get_current_group_index') else self.classification_service.current_group_index
-        rotation = self.group_rotations.get(current_group_index, 0)
-        
-        try:
-            debug_manager.log_info('开始加载图片', 'rotation', image_path=image_path, group_index=current_group_index, rotation=rotation)
-            pixmap = QPixmap(image_path)
-            if not pixmap.isNull():
-                debug_manager.log_info('图片加载成功，准备应用旋转', 'rotation', pixmap_size=f"{pixmap.width()}x{pixmap.height()}", rotation=rotation)
-                if rotation != 0:
-                    debug_manager.log_info('应用旋转变换', 'rotation', angle=rotation)
-                    transform = QTransform().rotate(rotation)
-                    pixmap = pixmap.transformed(transform, Qt.SmoothTransformation)
-                    debug_manager.log_info('旋转变换完成', 'rotation', new_size=f"{pixmap.width()}x{pixmap.height()}")
-                max_size = QSize(800, 600)
-                scaled_pixmap = pixmap.scaled(max_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                self.image_label.setPixmap(scaled_pixmap)
-                debug_manager.log_info('图片显示完成', 'rotation', image_path=image_path, rotation=rotation, final_size=f"{scaled_pixmap.width()}x{scaled_pixmap.height()}")
-            else:
-                debug_manager.log_warning('图片加载失败', 'image', image_path=image_path, reason='pixmap is null')
-                self.image_label.setText("无法加载图片")
-        except Exception as e:
-            debug_manager.log_exception(e, 'image', image_path=image_path)
-            self.image_label.setText("无法加载图片")
-
-        self.group_info.setText(f"组: {current_group_index + 1}/{len(groups)}")
-        self.image_info.setText(f"图片: {current_image_index + 1}/{len(current_group)}")
-        self.path_label.setText(image_path)
-
-    def _clear_image_display(self):
-        self.image_label.clear()
-        self.group_info.setText("组: 0/0")
-        self.image_info.setText("图片: 0/0")
-        self.path_label.setText("")
-
-    def update_duplicate_list(self):
-        self.duplicate_table.setRowCount(0)
-        duplicates = self.duplicate_service.get_duplicates()
-
-        row = 0
-        for md5, paths in duplicates.items():
-            self.duplicate_table.insertRow(row)
-            self.duplicate_table.setRowHeight(row, 36)
-            
-            checkbox = QCheckBox()
-            checkbox.setChecked(False)
-            checkbox.setStyleSheet("QCheckBox { width: 20px; height: 20px; }")
-            checkbox.setAlignment(Qt.AlignCenter)
-            self.duplicate_table.setCellWidget(row, 0, checkbox)
-            
-            filename = os.path.basename(paths[0])
-            if len(filename) > 30:
-                filename = filename[:27] + "..."
-            
-            item = QTableWidgetItem(f"重复 ({len(paths)}张): {filename}")
-            item.setData(Qt.UserRole, (md5, paths))
-            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-            item.setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
-            self.duplicate_table.setItem(row, 1, item)
-            
-            row += 1
-        
-        if duplicates:
-            self.duplicate_table.setColumnWidth(0, 40)
-            self.duplicate_table.setColumnWidth(1, self.duplicate_table.width() - 40)
-        
-        if not duplicates:
-            self.duplicate_table.insertRow(0)
-            self.duplicate_table.setRowHeight(0, 60)
-            
-            empty_item = QTableWidgetItem("暂无重复图片")
-            empty_item.setFlags(empty_item.flags() & ~Qt.ItemIsEditable)
-            empty_item.setTextAlignment(Qt.AlignCenter)
-            empty_item.setForeground(QColor("#7f8c8d"))
-            self.duplicate_table.setItem(0, 0, empty_item)
-            
-            self.duplicate_table.setSpan(0, 0, 1, 2)
-
-    def add_shortcut(self):
-        debug_manager.log_info('开始添加快捷键', 'shortcut')
-        dialog = ShortcutInputDialog(self)
-        result = dialog.exec_()
-
-        if result != QDialog.Accepted:
-            return
-
-        key = dialog.get_key()
-        if not key:
-            debug_manager.log_warning('按键为空', 'shortcut')
-            return
-
-        if key in self.classifier.get_all_shortcuts():
-            debug_manager.log_warning('快捷键已存在', 'shortcut', key=key)
-            QMessageBox.warning(self, "警告", "该快捷键已被使用")
-            return
-
-        folder_dialog = FolderSelectDialog(self)
-        folder_result = folder_dialog.exec_()
-
-        if folder_result != QDialog.Accepted:
-            debug_manager.log_info('用户取消选择文件夹', 'shortcut')
-            return
-
-        folder_path = folder_dialog.get_selected_path()
-        if not folder_path:
-            debug_manager.log_warning('未选择文件夹', 'shortcut')
-            return
-
-        if not self.classifier.add_shortcut(key, folder_path):
-            debug_manager.log_error('添加快捷键失败', 'shortcut', key=key, folder_path=folder_path)
-            QMessageBox.warning(self, "警告", "添加快捷键失败")
-            return
-
-        debug_manager.log_info('快捷键添加成功', 'shortcut', key=key, folder_path=folder_path)
-        self.load_shortcuts()
-        QMessageBox.information(self, "成功", f"已将快捷键 '{key}' 绑定到文件夹")
-
-    def remove_shortcut(self):
-        debug_manager.log_info('开始删除快捷键', 'shortcut')
-        selected_items = self.shortcut_list.selectedItems()
-        if not selected_items:
-            debug_manager.log_warning('未选择要删除的快捷键', 'shortcut')
-            QMessageBox.warning(self, "警告", "请选择要删除的快捷键")
-            return
-
-        key = selected_items[0].data(Qt.UserRole)
-        debug_manager.log_info('删除快捷键', 'shortcut', key=key)
-        if self.classifier.remove_shortcut(key):
-            self.load_shortcuts()
-            debug_manager.log_info('快捷键删除成功', 'shortcut', key=key)
-            QMessageBox.information(self, "成功", "快捷键已删除")
-        else:
-            debug_manager.log_error('快捷键删除失败', 'shortcut', key=key)
-            QMessageBox.warning(self, "警告", "删除快捷键失败")
-
-    def on_duplicate_table_click(self, row, column):
-        checkbox = self.duplicate_table.cellWidget(row, 0)
-        if checkbox:
-            checkbox.setChecked(not checkbox.isChecked())
-
-    def select_all_duplicates(self):
-        debug_manager.log_info('全选重复图片组', 'duplicate')
-        for row in range(self.duplicate_table.rowCount()):
-            checkbox = self.duplicate_table.cellWidget(row, 0)
-            if checkbox:
-                checkbox.setChecked(True)
-
-    def deselect_all_duplicates(self):
-        debug_manager.log_info('取消全选重复图片组', 'duplicate')
-        for row in range(self.duplicate_table.rowCount()):
-            checkbox = self.duplicate_table.cellWidget(row, 0)
-            if checkbox:
-                checkbox.setChecked(False)
-
-    def delete_selected_duplicates(self):
-        debug_manager.log_info('开始删除选中的重复图片', 'duplicate')
-        selected_rows = []
-        
-        for row in range(self.duplicate_table.rowCount()):
-            checkbox = self.duplicate_table.cellWidget(row, 0)
-            if checkbox and checkbox.isChecked():
-                item = self.duplicate_table.item(row, 1)
-                if item:
-                    data = item.data(Qt.UserRole)
-                    if data and len(data) == 2:
-                        selected_rows.append(data)
-        
-        if not selected_rows:
-            debug_manager.log_warning('未选择重复图片组', 'duplicate')
-            QMessageBox.warning(self, "警告", "请选择要处理的重复图片组")
-            return
-
-        total_paths = sum(len(paths) for _, paths in selected_rows)
-        total_deletions = sum(len(paths) - 1 for _, paths in selected_rows)
-
+    def show_delete_confirm_dialog(self, group_count, total_paths, total_deletions, callback):
         reply = QMessageBox.question(
             self,
             "确认删除",
-            f"共选择 {len(selected_rows)} 组重复图片，\n"
+            f"共选择 {group_count} 组重复图片，\n"
             f"总计 {total_paths} 张图片，\n"
             f"将保留每组第一张，删除其余 {total_deletions} 张，\n"
             f"是否继续？",
@@ -989,206 +944,203 @@ class MainWindow(QMainWindow):
         )
 
         if reply == QMessageBox.Yes:
-            debug_manager.log_info('用户确认删除', 'duplicate', group_count=len(selected_rows))
-            
-            for md5_hash, paths in selected_rows:
-                deleted_paths, failed_paths = self.duplicate_service.delete_duplicate_group(md5_hash, paths)
-                for path in failed_paths:
-                    QMessageBox.warning(self, "警告", f"删除失败: {path}")
+            selected_items = self.get_selected_duplicates()
+            callback(selected_items)
 
-            self.update_duplicate_list()
-            self.refresh_groups()
+    def show_duplicate_detail_dialog(self, selected_groups, selected_md5s, callback):
+        """打开重复图片详情对话框。
 
-            if self.duplicate_service.is_all_processed():
-                self.status_label.setText("所有重复图片已处理完成")
-                self.duplicate_service.clear_all_duplicate_memory()
-
-    def clear_storage(self):
-        debug_manager.log_info('打开存储清除对话框', 'storage')
-        dialog = StorageCleanDialog(self)
-        result = dialog.exec_()
-
+        Args:
+            selected_groups: 用户选中的重复组路径列表
+            selected_md5s: 对应的 MD5 列表
+            callback: 关闭后回调，签名为 callback(deletions)，deletions 为
+                      [(md5_hash, [paths]), ...] 列表（取消时为空列表）
+        """
+        detail_dialog = DuplicateDetailDialog(selected_groups, self, selected_md5s)
+        result = detail_dialog.exec_()
         if result == QDialog.Accepted:
-            self.load_shortcuts()
-            self.update_recent_folders()
-            self.status_label.setText("存储已清除")
-            debug_manager.log_info('存储清除完成', 'storage')
-
-    def refresh_groups(self):
-        self.classification_service.refresh_groups()
-
-        if self.classification_service.is_classification_complete():
-            self.classifier.clear_unfinished_session()
-            self.status_label.setText("分类完成！")
-
-        self.show_current_image()
-
-    def classify_current_group(self, shortcut: str):
-        success_count, failed_paths = self.classification_service.classify_current_group(shortcut)
-
-        folder_name = os.path.basename(self.classifier.get_folder(shortcut))
-        if success_count > 0 and not failed_paths:
-            self.status_label.setText(f"已将 {success_count} 张图片分类到 '{folder_name}'")
-        elif success_count > 0 and failed_paths:
-            self.status_label.setText(f"分类完成: {success_count}成功, {len(failed_paths)}失败")
-        elif failed_paths:
-            self.status_label.setText(f"分类失败: {len(failed_paths)}张图片")
-
-        self.show_current_image()
-
-    def closeEvent(self, event):
-        groups = self.classification_service.get_groups()
-
-        if groups and self.classifier.current_folder:
-            total_count = sum(len(g) for g in groups) + len(self.classification_service.processed_images)
-            processed_count = len(self.classification_service.processed_images)
-
-            if total_count > 0 and processed_count < total_count:
-                session_data = {
-                    'folder_path': self.classifier.current_folder,
-                    'total_count': total_count,
-                    'processed_count': processed_count,
-                    'timestamp': datetime.now().isoformat()
-                }
-                self.classifier.save_unfinished_session(session_data)
-            else:
-                self.classifier.clear_unfinished_session()
-
-        event.accept()
-
-    def keyPressEvent(self, event):
-        key = event.key()
-        modifiers = event.modifiers()
-        has_ctrl = bool(modifiers & Qt.ControlModifier)
-        is_left = key == Qt.Key_Left
-        is_right = key == Qt.Key_Right
-        is_up = key == Qt.Key_Up
-        is_down = key == Qt.Key_Down
-        debug_manager.log_info('keyPressEvent: 键盘事件', 'keyboard', key=key, modifiers=modifiers, has_ctrl=has_ctrl, is_left=is_left, is_right=is_right, is_up=is_up, is_down=is_down)
-
-        if has_ctrl:
-            if is_left:
-                debug_manager.log_info('keyPressEvent: Ctrl+Left -> 调用rotate_image(False)', 'keyboard')
-                self.rotate_image(False)
-                return
-            elif is_right:
-                debug_manager.log_info('keyPressEvent: Ctrl+Right -> 调用rotate_image(True)', 'keyboard')
-                self.rotate_image(True)
-                return
-            elif is_up:
-                debug_manager.log_info('keyPressEvent: Ctrl+Up -> 调用rotate_image(False, 180)', 'keyboard')
-                self.rotate_image(False, 180)
-                return
-            elif is_down:
-                debug_manager.log_info('keyPressEvent: Ctrl+Down -> 调用rotate_image(True, 180)', 'keyboard')
-                self.rotate_image(True, 180)
-                return
-
-        if is_left:
-            debug_manager.log_info('keyPressEvent: Left -> 调用prev_image()', 'keyboard')
-            self.prev_image()
-        elif is_right:
-            debug_manager.log_info('keyPressEvent: Right -> 调用next_image()', 'keyboard')
-            self.next_image()
-        elif is_up:
-            debug_manager.log_info('keyPressEvent: Up -> 调用prev_group()', 'keyboard')
-            self.prev_group()
-        elif is_down:
-            debug_manager.log_info('keyPressEvent: Down -> 调用next_group()', 'keyboard')
-            self.next_group()
+            deletions = detail_dialog.get_deletion_result()
         else:
-            key_str = key_to_string(key)
-            debug_manager.log_info('keyPressEvent: 其他按键', 'keyboard', key_str=key_str, is_shortcut=key_str in self.classifier.get_all_shortcuts() if key_str else False)
-            if key_str and key_str in self.classifier.get_all_shortcuts():
-                self.classify_current_group(key_str)
-            else:
-                debug_manager.log_info('keyPressEvent: 调用父类keyPressEvent', 'keyboard')
-                super().keyPressEvent(event)
+            deletions = []
+        callback(deletions)
 
-    def prev_image(self):
-        debug_manager.log_info('切换到上一张图片', 'rotation')
-        self.classification_service.prev_image()
-        self.show_current_image()
+    def show_storage_clean_dialog(self, storage_size: int, storage_details: dict):
+        """打开存储清理对话框。
+
+        Args:
+            storage_size: 总存储占用字节数
+            storage_details: 各类别详情字典
+
+        Returns:
+            选中类别键列表，或 None（用户取消）
+        """
+        dialog = StorageCleanDialog(storage_size, storage_details, self)
+        if dialog.exec_() == QDialog.Accepted:
+            return dialog.get_selected_categories()
+        return None
+
+    def select_folder(self):
+        self.presenter.select_folder()
+
+    def on_folder_selected(self, folder_path):
+        self.presenter.on_folder_selected(folder_path)
+
+    def on_recent_folder_selected(self, index: int):
+        if index == 0:
+            return
+
+        folder_path = self.recent_combo.itemData(index)
+        if folder_path and os.path.exists(folder_path):
+            self.presenter.start_scanning(folder_path)
+        elif folder_path:
+            debug_manager.log_warning('最近文件夹不存在', 'folder', folder_path=folder_path)
+            QMessageBox.warning(self, "警告", f"文件夹不存在: {folder_path}")
+            self.update_recent_folders(self.presenter.get_recent_folders())
+
+    def on_threshold_changed(self, threshold: int):
+        """滑块值变化：立即更新数字显示（即时反馈），重启防抖定时器延迟执行重分组。
+
+        拖动时 valueChanged 高频触发，若每次都执行 group_by_similarity(O(n²)) +
+        磁盘 IO + UI 刷新会导致明显卡顿。防抖 300ms 后才调用 Presenter 执行重量级操作。
+        """
+        # 输入框有焦点时（用户正在编辑）不覆盖其文本，避免干扰输入
+        if not self.threshold_value_edit.hasFocus():
+            self.threshold_value_edit.setText(str(threshold))
+        self._pending_threshold = threshold
+        self._threshold_timer.start()
+
+    def _apply_threshold(self):
+        """防抖超时后执行：调用 Presenter 进行重分组等重量级操作。"""
+        if self._pending_threshold is not None:
+            threshold = self._pending_threshold
+            self._pending_threshold = None
+            self.presenter.on_threshold_changed(threshold)
+
+    def on_threshold_minus(self):
+        """减号按钮：阈值减 1（下限 2）。通过设置滑块值触发统一变更流程。"""
+        new_val = max(2, self.threshold_slider.value() - 1)
+        self.threshold_slider.setValue(new_val)
+
+    def on_threshold_plus(self):
+        """加号按钮：阈值加 1（上限 25）。通过设置滑块值触发统一变更流程。"""
+        new_val = min(25, self.threshold_slider.value() + 1)
+        self.threshold_slider.setValue(new_val)
+
+    def on_threshold_edit_finished(self):
+        """输入框编辑完成（Enter 或失去焦点）：验证输入并同步滑块。
+
+        无效输入（非数字、超出范围）会被校正到最近的合法值。
+        通过设置滑块值触发 valueChanged，走统一的防抖变更流程。
+        """
+        text = self.threshold_value_edit.text().strip()
+        try:
+            val = int(text)
+        except ValueError:
+            val = self.threshold_slider.value()
+        # 校正到合法范围
+        val = max(2, min(25, val))
+        # 同步输入框显示为校正后的值
+        self.threshold_value_edit.setText(str(val))
+        # 若与当前滑块值不同则更新滑块，触发防抖变更流程
+        if val != self.threshold_slider.value():
+            self.threshold_slider.setValue(val)
+        # 清除焦点，确保后续快捷键能正常触发
+        self.threshold_value_edit.clearFocus()
 
     def next_image(self):
-        debug_manager.log_info('切换到下一张图片', 'rotation')
-        self.classification_service.next_image()
-        self.show_current_image()
+        self.presenter.next_image()
 
-    def prev_group(self):
-        debug_manager.log_info('切换到上一组', 'rotation')
-        self.classification_service.prev_group()
-        self.show_current_image()
+    def prev_image(self):
+        self.presenter.prev_image()
 
     def next_group(self):
-        debug_manager.log_info('切换到下一组', 'rotation')
-        self.classification_service.next_group()
-        self.show_current_image()
+        self.presenter.next_group()
 
-    def rotate_image(self, clockwise: bool, degrees: int = 90):
-        current_group_index = self.classification_service.get_current_group_index() if hasattr(self.classification_service, 'get_current_group_index') else self.classification_service.current_group_index
-        current_rotation = self.group_rotations.get(current_group_index, 0)
-        
-        debug_manager.log_info('开始旋转图片', 'rotation', clockwise=clockwise, degrees=degrees, group_index=current_group_index, rotation_before=current_rotation)
-        
-        if clockwise:
-            new_rotation = (current_rotation - degrees) % 360
-        else:
-            new_rotation = (current_rotation + degrees) % 360
-        
-        self.group_rotations[current_group_index] = new_rotation
-        debug_manager.log_info('图片旋转完成', 'rotation', clockwise=clockwise, degrees=degrees, group_index=current_group_index, rotation_after=new_rotation)
-        self.show_current_image()
+    def prev_group(self):
+        self.presenter.prev_group()
+
+    def rotate_image(self, clockwise: bool, angle: int = 90):
+        self.presenter.rotate_image(clockwise, angle)
+
+    def add_shortcut(self):
+        dialog = ShortcutInputDialog(self)
+        if dialog.exec_() == QDialog.Accepted:
+            # get_key() 返回的 selected_key 已经是 key_to_string 转换后的字符串
+            key = dialog.get_key()
+            if key:
+                folder_dialog = FolderSelectDialog(self)
+                if folder_dialog.exec_() == QDialog.Accepted:
+                    folder_path = folder_dialog.get_selected_path()
+                    if folder_path:
+                        self.presenter.add_shortcut(key, folder_path)
+
+    def remove_shortcut(self):
+        current_item = self.shortcut_list.currentItem()
+        if not current_item:
+            QMessageBox.warning(self, "警告", "请选择要删除的快捷键")
+            return
+
+        key = current_item.data(Qt.UserRole)
+        self.presenter.remove_shortcut(key)
+
+    def select_all_duplicates(self):
+        for i in range(self.duplicate_list.count()):
+            item = self.duplicate_list.item(i)
+            if item and (item.flags() & Qt.ItemIsEnabled):
+                item.setCheckState(Qt.Checked)
+
+    def deselect_all_duplicates(self):
+        for i in range(self.duplicate_list.count()):
+            item = self.duplicate_list.item(i)
+            if item and (item.flags() & Qt.ItemIsEnabled):
+                item.setCheckState(Qt.Unchecked)
+
+    def on_duplicate_item_clicked(self, item):
+        if item and (item.flags() & Qt.ItemIsEnabled):
+            if item.checkState() == Qt.Checked:
+                item.setCheckState(Qt.Unchecked)
+            else:
+                item.setCheckState(Qt.Checked)
+
+    def get_selected_duplicates(self):
+        selected_items = []
+        for i in range(self.duplicate_list.count()):
+            item = self.duplicate_list.item(i)
+            if item and item.checkState() == Qt.Checked:
+                data = item.data(Qt.UserRole)
+                if data and len(data) == 2:
+                    selected_items.append(data)
+        return selected_items
+
+    def delete_selected_duplicates(self):
+        self.presenter.delete_selected_duplicates()
 
     def show_duplicate_detail(self):
-        duplicates = self.duplicate_service.get_duplicates()
+        self.presenter.show_duplicate_detail()
 
-        if not duplicates:
-            debug_manager.log_info('暂无重复图片', 'duplicate')
-            QMessageBox.information(self, "提示", "暂无重复图片")
-            return
+    def on_duplicate_detail_closed(self, result, selected_md5s):
+        self.presenter.on_duplicate_detail_closed(result, selected_md5s)
 
-        valid_groups = self.duplicate_service.get_valid_groups()
-        if not valid_groups:
-            debug_manager.log_info('暂无有效重复图片组', 'duplicate')
-            QMessageBox.information(self, "提示", "暂无重复图片")
-            return
+    def clear_storage(self):
+        self.presenter.clear_storage()
 
-        selected_groups = []
-        selected_md5s = []
-        
-        for row in range(self.duplicate_table.rowCount()):
-            checkbox = self.duplicate_table.cellWidget(row, 0)
-            if checkbox and checkbox.isChecked():
-                item = self.duplicate_table.item(row, 1)
-                if item:
-                    data = item.data(Qt.UserRole)
-                    if data and len(data) == 2:
-                        md5_hash, paths = data
-                        if paths and len(paths) > 1:
-                            selected_groups.append(paths)
-                            selected_md5s.append(md5_hash)
+    def on_image_classified(self, old_path, new_path):
+        debug_manager.log_info('图片分类完成', 'classification', old_path=old_path, new_path=new_path)
+        # 分类后清除已移动图片的缓存
+        if old_path in self._image_cache:
+            del self._image_cache[old_path]
 
-        if not selected_groups:
-            selected_groups = [valid_groups[0][1]]
-            selected_md5s = [valid_groups[0][0]]
+    def invalidate_image_cache(self, path: str = None):
+        """清除图片缓存。若指定路径则只清除该路径，否则清除全部。"""
+        if path:
+            if path in self._image_cache:
+                del self._image_cache[path]
+        else:
+            self._image_cache.clear()
 
-        try:
-            debug_manager.log_info('打开重复图片详情', 'duplicate', group_count=len(selected_groups))
-            detail_dialog = DuplicateDetailDialog(selected_groups, self, selected_md5s)
-            result = detail_dialog.exec_()
+    def refresh_groups(self):
+        self.show_current_image()
 
-            if result == QDialog.Accepted:
-                duplicates = self.duplicate_service.get_duplicates()
-                for md5_hash in selected_md5s:
-                    if md5_hash and md5_hash in duplicates:
-                        del self.duplicate_service.duplicates[md5_hash]
-                self.update_duplicate_list()
-                self.refresh_groups()
-
-                if self.duplicate_service.is_all_processed():
-                    self.status_label.setText("所有重复图片已处理完成")
-                    self.duplicate_service.clear_all_duplicate_memory()
-        except Exception as e:
-            debug_manager.log_exception(e, 'duplicate', group_count=len(selected_groups))
-            QMessageBox.critical(self, "错误", f"打开详情窗口失败: {str(e)}")
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.show_current_image()

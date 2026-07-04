@@ -15,6 +15,28 @@ class ShortcutInputDialog(QDialog):
         self.setFixedSize(320, 190)
         self.setModal(True)
         self.setFocusPolicy(Qt.StrongFocus)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #2d2d2d;
+            }
+            QLabel {
+                color: #ecf0f1;
+            }
+            QPushButton {
+                background-color: #34495e;
+                color: #ecf0f1;
+                border: 1px solid #2c3e50;
+                border-radius: 3px;
+                padding: 6px 16px;
+            }
+            QPushButton:hover {
+                background-color: #3d566e;
+            }
+            QPushButton:disabled {
+                background-color: #2c3e50;
+                color: #7f8c8d;
+            }
+        """)
         
         self.selected_key = None
         self.confirm_mode = False
@@ -32,23 +54,23 @@ class ShortcutInputDialog(QDialog):
         
         self.title_label = QLabel("请按下要绑定的按键")
         self.title_label.setAlignment(Qt.AlignCenter)
-        self.title_label.setStyleSheet("font-size: 14px; color: #333;")
+        self.title_label.setStyleSheet("font-size: 16px; color: #ecf0f1; font-weight: bold;")
         
         self.key_display = QLabel("")
         self.key_display.setAlignment(Qt.AlignCenter)
         self.key_display.setStyleSheet("""
             font-size: 48px; 
             font-weight: bold; 
-            color: #4a90d9; 
-            border: 2px dashed #ccc; 
+            color: #3498db; 
+            border: 2px dashed #34495e; 
             border-radius: 10px; 
             padding: 20px;
-            background-color: #f8f9fa;
+            background-color: #1e1e1e;
         """)
         
         self.hint_label = QLabel("按 ESC 取消 | 按 Enter 确认")
         self.hint_label.setAlignment(Qt.AlignCenter)
-        self.hint_label.setStyleSheet("font-size: 12px; color: #999;")
+        self.hint_label.setStyleSheet("font-size: 12px; color: #7f8c8d;")
         
         button_layout = QHBoxLayout()
         
