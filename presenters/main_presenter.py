@@ -25,8 +25,6 @@ class MainPresenter:
         self.hash_completed = False
         self.hash_list = []
         self.group_rotations = {}
-        self._resuming_session = False
-        self._pending_session_data = None
 
     def load_initial_data(self):
         self.classifier.load_config()
@@ -63,10 +61,6 @@ class MainPresenter:
         )
 
     def on_unfinished_session_continue(self, folder_path):
-        """用户选择继续未完成会话：启动扫描，待扫描完成后恢复进度。"""
-        session = self.classifier.get_unfinished_session()
-        self._resuming_session = True
-        self._pending_session_data = session
         self.start_scanning(folder_path)
 
     def on_unfinished_session_cancel(self):
@@ -86,14 +80,11 @@ class MainPresenter:
         """启动文件夹扫描流程。
 
         公开方法，供 View 层（如最近文件夹选择）和内部回调统一调用。
-        切换文件夹前先保存当前哈希缓存，再重置状态、启动后台扫描线程。
+        设置状态、重置哈希列表、启动后台扫描线程。
         """
-        # 切换文件夹前保存当前哈希缓存，避免内存中的哈希数据丢失
-        self._save_current_hash_cache()
-
         self.view.set_status("正在扫描图片...")
+        self.view.hide_threshold_group()
         self.hash_list = []
-        self.hash_completed = False
 
         self.scan_thread = ScanThread(folder_path)
         # 使用 Qt 信号连接，自动跨线程调度到主线程执行
@@ -101,122 +92,6 @@ class MainPresenter:
         self.scan_thread.finished.connect(self.on_scan_finished)
         self.scan_thread.error.connect(self.on_scan_error)
         self.scan_thread.start()
-
-    def _save_current_hash_cache(self):
-        """保存当前内存中的哈希状态到磁盘缓存。
-
-        在切换文件夹或关闭应用时调用，确保持久化最新的哈希数据。
-        若无当前文件夹或无 hash_list 数据则跳过。
-        """
-        if not self.classifier.current_folder:
-            return
-        if not self.hash_list:
-            return
-
-        # 当前剩余的图片路径（用于文件元信息缓存）
-        all_image_paths = []
-        for group in self.classification_service.get_groups():
-            all_image_paths.extend(group)
-
-        # 重新分组以反映最新状态
-        threshold = self.classifier.get_hash_threshold()
-        groups = HashAnalysisService.group_by_similarity(self.hash_list, threshold)
-
-        cache = self.classifier.build_hash_cache(
-            all_image_paths, groups,
-            self.duplicate_service.get_duplicates(), self.hash_list
-        )
-        self.classifier.save_hash_cache(cache)
-        debug_manager.log_info('哈希缓存已保存', 'hash',
-                               folder=self.classifier.current_folder,
-                               hash_count=len(self.hash_list))
-
-    def _incremental_update_hash(self, image_paths: list, changed_files: list, cache: dict):
-        """对新增/变化的图片增量计算哈希，合并到现有缓存。
-
-        相比完整哈希分析（弹出对话框），此方法直接在主线程快速完成：
-        - 从缓存 hash_list 中移除已删除的图片
-        - 只对 changed_files 计算 md5 和 img_hash
-        - 合并后重新分组并保存缓存
-
-        Args:
-            image_paths: 当前扫描到的所有图片路径
-            changed_files: 新增或修改的文件路径列表
-            cache: 已加载的哈希缓存字典
-        """
-        from core.image_scanner import ImageScanner
-
-        debug_manager.log_info('增量更新哈希', 'hash',
-                               total=len(image_paths), changed=len(changed_files))
-
-        cached_hash_list = cache.get('hash_list', [])
-        cached_file_hashes = cache.get('file_hashes', {})
-
-        # 从 hash_list 中移除已删除的图片（不在当前 image_paths 中的）
-        current_path_set = set(image_paths)
-        hash_list = [(p, h) for p, h in cached_hash_list if p in current_path_set]
-        removed_count = len(cached_hash_list) - len(hash_list)
-        if removed_count:
-            debug_manager.log_info('移除已删除图片的哈希', 'hash', removed_count=removed_count)
-
-        # 对 changed_files 计算哈希
-        scanner = ImageScanner()
-        existing_paths = {p for p, _ in hash_list}
-        changed_path_set = set(changed_files)
-
-        for path in changed_files:
-            # 修改的文件先移除旧哈希
-            if path in existing_paths:
-                hash_list = [(p, h) for p, h in hash_list if p != path]
-
-            img_hash = scanner.compute_image_hash(path)
-            if img_hash:
-                hash_list.append((path, img_hash))
-
-        self.hash_list = hash_list
-        self.hash_completed = True
-
-        # 重新分组
-        threshold = self.classifier.get_hash_threshold()
-        groups = HashAnalysisService.group_by_similarity(hash_list, threshold)
-
-        # 增量计算 MD5 用于重复检测
-        md5_map = {}
-        for path in image_paths:
-            if path in changed_path_set:
-                md5 = scanner.compute_md5(path)
-            elif path in cached_file_hashes and 'md5' in cached_file_hashes[path]:
-                md5 = cached_file_hashes[path]['md5']
-            else:
-                md5 = scanner.compute_md5(path)
-            if md5:
-                md5_map.setdefault(md5, []).append(path)
-
-        duplicates = {md5: paths for md5, paths in md5_map.items() if len(paths) > 1}
-
-        # 应用分组
-        self._apply_groups(groups)
-        self.duplicate_service.set_duplicates(duplicates)
-
-        # 保存缓存
-        all_image_paths = []
-        for group in self.classification_service.get_groups():
-            all_image_paths.extend(group)
-
-        new_cache = self.classifier.build_hash_cache(
-            all_image_paths, groups, duplicates, hash_list
-        )
-        self.classifier.save_hash_cache(new_cache)
-
-        # 更新 UI
-        self.view.show_current_image()
-        self.view.update_duplicate_list(self.duplicate_service.get_duplicates())
-        self._update_hash_status(groups, duplicates)
-
-        debug_manager.log_info('增量更新完成', 'hash',
-                               hash_count=len(hash_list),
-                               group_count=len(groups),
-                               duplicate_count=len(duplicates))
 
     def on_scan_progress(self, current: int, total: int):
         self.view.set_status(f"正在扫描: {current}/{total}")
@@ -231,30 +106,13 @@ class MainPresenter:
             self.view.set_status("未找到图片")
             return
 
-        # 若为恢复未完成会话，则还原进度（已处理图片、当前索引）
-        if self._resuming_session and self._pending_session_data:
-            self._restore_session_progress(self._pending_session_data, image_paths)
-            self._resuming_session = False
-            self._pending_session_data = None
-
         self.view.show_current_image()
         self.view.set_status(f"扫描完成，共 {len(image_paths)} 张图片")
 
         files_changed, changed_files = self.classifier.check_files_changed(image_paths)
         if files_changed:
-            cache = self.classifier.load_hash_cache()
-            cached_hash_list = cache.get('hash_list', [])
-
-            if cached_hash_list and changed_files and len(changed_files) < len(image_paths):
-                # 有缓存且仅部分文件变化：增量更新，不弹出哈希分析对话框
-                debug_manager.log_info('检测到新增/变化文件，增量更新哈希', 'hash',
-                                       changed_count=len(changed_files), cached_count=len(cached_hash_list))
-                self.view.set_status(f"正在增量分析 {len(changed_files)} 张新图片...")
-                self._incremental_update_hash(image_paths, changed_files, cache)
-            else:
-                # 无缓存或大量变化：启动完整哈希分析（弹出对话框）
-                debug_manager.log_info('文件有变化，开始完整哈希分析', 'hash', changed_count=len(changed_files))
-                self._start_hash_analysis(image_paths)
+            debug_manager.log_info('文件有变化，开始哈希分析', 'hash', changed_count=len(changed_files))
+            self._start_hash_analysis(image_paths)
         else:
             debug_manager.log_info('文件无变化，跳过哈希分析', 'hash')
             self.hash_completed = True
@@ -268,85 +126,15 @@ class MainPresenter:
     def _post_scan_setup(self, folder_path: str, image_paths: list):
         self.classifier.load_config(folder_path)
         self.classifier.load_duplicate_memory()
-        # 将当前文件夹保存到最近列表（扫描完成即记录，不依赖分类操作）
-        self.classifier.save_recent_folders(folder_path)
-
+        
         shortcuts = self.classifier.get_all_shortcuts()
         recent_folders = self.classifier.get_recent_folders()
-
+        
         self.view.update_shortcuts(shortcuts)
         self.view.update_recent_folders(recent_folders)
-        # 切换文件夹时清除图片缓存，避免旧图片占用内存
-        self.view.invalidate_image_cache()
-
+        
         self.classification_service.set_groups([[path] for path in image_paths])
         self.group_rotations = {}
-
-    def _restore_session_progress(self, session: dict, image_paths: list):
-        """恢复未完成会话的进度：已处理图片、当前图片索引。
-
-        从 session 中读取 processed_images（路径列表）和 current_image（当前图片路径），
-        还原到 ClassificationService 中。若路径已不存在则跳过。
-        """
-        processed = session.get('processed_images', [])
-        current_image = session.get('current_image', "")
-        debug_manager.log_info(
-            '恢复未完成会话进度', 'session',
-            processed_count=len(processed), current_image=current_image
-        )
-        # 还原已处理图片（仅保留当前仍存在的图片路径）
-        valid_processed = [p for p in processed if p in image_paths]
-        for p in valid_processed:
-            self.classification_service.mark_processed(p)
-        # 还原当前图片索引：找到当前图片在 image_paths 中的位置
-        if current_image and current_image in image_paths:
-            idx = image_paths.index(current_image)
-            self.classification_service.current_group_index = idx
-            self.classification_service.current_image_index = 0
-        # 恢复后清除未完成会话标记（用户已继续，会话生效）
-        self.classifier.clear_unfinished_session()
-
-    def on_app_close(self):
-        """应用关闭时的清理工作：保存哈希缓存和未完成会话。
-
-        先保存当前哈希缓存（避免内存数据丢失），再保存未完成会话。
-        """
-        debug_manager.log_info('应用关闭，执行清理', 'session')
-        # 保存当前哈希缓存
-        self._save_current_hash_cache()
-
-        if not self.classifier.current_folder:
-            debug_manager.log_info('无当前文件夹，跳过会话保存', 'session')
-            return
-        groups = self.classification_service.get_groups()
-        total = sum(len(g) for g in groups)
-        if total == 0:
-            debug_manager.log_info('无图片数据，跳过会话保存', 'session')
-            self.classifier.clear_unfinished_session()
-            return
-        processed = self.classification_service.processed_images
-        processed_count = len(processed)
-        # 全部处理完成则清除未完成会话
-        if processed_count >= total:
-            debug_manager.log_info('分类已全部完成，清除未完成会话', 'session')
-            self.classifier.clear_unfinished_session()
-            return
-        # 保存未完成会话
-        current_image = self.classification_service.get_current_image()
-        session_data = {
-            'folder_path': self.classifier.current_folder,
-            'total_count': total,
-            'processed_count': processed_count,
-            'remaining': total - processed_count,
-            'current_image': current_image,
-            'processed_images': list(processed),
-        }
-        self.classifier.save_unfinished_session(session_data)
-        debug_manager.log_info(
-            '未完成会话已保存', 'session',
-            folder=self.classifier.current_folder,
-            processed=processed_count, total=total
-        )
 
     def _start_hash_analysis(self, image_paths: list):
         self.hash_scanning = True
@@ -435,6 +223,7 @@ class MainPresenter:
         debug_manager.log_info('保存哈希缓存', 'hash', file_hashes_count=len(cache.get('file_hashes', {})))
         self.classifier.save_hash_cache(cache)
 
+        self.view.show_threshold_group()
         self.view.show_current_image()
         self.view.update_duplicate_list(self.duplicate_service.get_duplicates())
         self._update_hash_status(groups, duplicates)
@@ -476,7 +265,10 @@ class MainPresenter:
             debug_manager.log_info('缓存相似分组加载完成', 'hash', group_count=len(self.classification_service.get_groups()))
         
         self.duplicate_service.set_duplicates(duplicates)
-
+        
+        if self.hash_completed and self.hash_list:
+            self.view.show_threshold_group()
+        
         self.view.show_current_image()
         self.view.update_duplicate_list(self.duplicate_service.get_duplicates())
         
@@ -490,32 +282,36 @@ class MainPresenter:
     def next_image(self):
         current_index = self.classification_service.current_image_index
         current_group = self.classification_service.get_current_group()
-
+        
         if current_index < len(current_group) - 1:
             self.classification_service.next_image()
+            self.view.show_current_image()
         else:
-            self.classification_service.next_group()
-        self.view.show_current_image()
+            self.next_group()
 
     def prev_image(self):
         current_index = self.classification_service.current_image_index
-
+        
         if current_index > 0:
             self.classification_service.prev_image()
+            self.view.show_current_image()
         else:
-            self.classification_service.prev_group()
-            current_group = self.classification_service.get_current_group()
-            if current_group:
-                self.classification_service.current_image_index = len(current_group) - 1
-        self.view.show_current_image()
+            self.prev_group()
 
     def next_group(self):
-        self.classification_service.next_group()
-        self.view.show_current_image()
+        current_group_index = self.classification_service.current_group_index
+        all_groups = self.classification_service.get_groups()
+        
+        if current_group_index < len(all_groups) - 1:
+            self.classification_service.next_group()
+            self.view.show_current_image()
 
     def prev_group(self):
-        self.classification_service.prev_group()
-        self.view.show_current_image()
+        current_group_index = self.classification_service.current_group_index
+        
+        if current_group_index > 0:
+            self.classification_service.prev_group()
+            self.view.show_current_image()
 
     def rotate_image(self, clockwise: bool, angle: int = 90):
         current_group_index = self.classification_service.current_group_index
@@ -540,29 +336,25 @@ class MainPresenter:
         current_path = self.classification_service.get_current_image()
         if not current_path:
             return
-
+        
         target_path = self.classifier.classify_image(current_path, category)
         if target_path:
             self.view.on_image_classified(current_path, target_path)
             self.classification_service.mark_processed(current_path)
-
+            
             if self.hash_completed and self.hash_list:
-                self._remove_from_hash_list(current_path)
-
+                groups = HashAnalysisService.group_by_similarity(self.hash_list, self.classifier.get_hash_threshold())
+                self._apply_groups(groups)
+                
+                cache = self.classifier.load_hash_cache()
+                if cache:
+                    cache['similar_groups'] = groups
+                    self.classifier.save_hash_cache(cache)
+            
             self.view.show_current_image()
             self.view.update_duplicate_list(self.duplicate_service.get_duplicates())
 
-    def _remove_from_hash_list(self, path: str):
-        """从 hash_list 中增量移除指定路径，避免 O(n²) 重新分组。"""
-        new_hash_list = [(p, h) for p, h in self.hash_list if p != path]
-        if len(new_hash_list) != len(self.hash_list):
-            self.hash_list = new_hash_list
-            debug_manager.log_info('hash_list 增量移除', 'hash', removed=path, remaining=len(self.hash_list))
-
     def add_shortcut(self, key_string: str, folder_path: str):
-        if not self.classifier.current_folder:
-            self.view.show_error_message("请先选择要分类的图片文件夹")
-            return
         if self.classifier.add_shortcut(key_string, folder_path):
             shortcuts = self.classifier.get_all_shortcuts()
             self.view.update_shortcuts(shortcuts)
@@ -675,85 +467,11 @@ class MainPresenter:
             self.view.show_info_message("存储已清理")
             self.view.update_shortcuts(self.classifier.get_all_shortcuts())
 
-    def get_shortcuts(self) -> dict:
-        """获取当前快捷键映射，供 View 层按键匹配使用。"""
-        return self.classifier.get_all_shortcuts()
-
     def get_groups(self) -> list:
         return self.classification_service.get_groups()
 
     def get_current_image_path(self) -> Optional[str]:
         return self.classification_service.get_current_image()
-
-    def rename_current_image(self, new_filename: str) -> Tuple[bool, str]:
-        """重命名当前图片文件。
-
-        Args:
-            new_filename: 新文件名（可以带或不带扩展名；不带则保留原扩展名）
-
-        Returns:
-            (是否成功, 消息文本)
-        """
-        old_path = self.classification_service.get_current_image()
-        if not old_path or not os.path.exists(old_path):
-            return False, "当前图片不存在"
-
-        folder = os.path.dirname(old_path)
-        old_name = os.path.basename(old_path)
-        _, old_ext = os.path.splitext(old_name)
-
-        # 处理新文件名：若没有扩展名则追加原扩展名
-        new_name_base, new_ext = os.path.splitext(new_filename)
-        if not new_ext:
-            new_filename = new_name_base + old_ext
-            new_ext = old_ext
-
-        # 校验文件名不含非法字符
-        invalid_chars = '<>:"/\\|?*'
-        for ch in invalid_chars:
-            if ch in new_filename:
-                return False, f"文件名包含非法字符: {ch}"
-
-        # Windows 保留名检查
-        reserved_names = ['CON', 'PRN', 'AUX', 'NUL'] + \
-                         [f'COM{i}' for i in range(1, 10)] + \
-                         [f'LPT{i}' for i in range(1, 10)]
-        if new_name_base.upper() in reserved_names:
-            return False, f"文件名 '{new_name_base}' 是系统保留名"
-
-        # 新路径
-        new_path = os.path.join(folder, new_filename)
-
-        # 同名文件已存在
-        if os.path.exists(new_path) and os.path.abspath(new_path) != os.path.abspath(old_path):
-            return False, f"文件已存在: {new_filename}"
-
-        # 执行重命名
-        try:
-            os.rename(old_path, new_path)
-        except OSError as e:
-            debug_manager.log_exception('重命名文件失败', 'rename', error=str(e), old=old_path, new=new_path)
-            return False, str(e)
-
-        # 同步更新各服务中的路径引用
-        self.classification_service.rename_path(old_path, new_path)
-        self.duplicate_service.rename_path(old_path, new_path)
-
-        # 同步哈希缓存（内存 + 磁盘）
-        if self.hash_list:
-            for i, (p, h) in enumerate(self.hash_list):
-                if p == old_path:
-                    self.hash_list[i] = (new_path, h)
-                    break
-        self.classifier.rename_in_hash_cache(old_path, new_path)
-
-        # 刷新 UI：重复图片列表
-        self.view.update_duplicate_list(self.duplicate_service.get_duplicates())
-        # 清除图片缓存（旧路径失效）
-        self.view.invalidate_image_cache(old_path)
-
-        debug_manager.log_info('图片重命名成功', 'rename', old=old_name, new=new_filename)
-        return True, f"{old_name} → {new_filename}"
 
     def get_current_group_index(self) -> int:
         return self.classification_service.current_group_index

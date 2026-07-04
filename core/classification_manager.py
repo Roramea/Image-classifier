@@ -78,7 +78,6 @@ class ClassificationManager:
             config_file = self.get_config_file(self.last_folder)
         else:
             self.shortcut_map = {}
-            self.current_folder = ""
             debug_manager.log_info('无配置文件，使用空映射', 'config')
             return
         
@@ -229,56 +228,6 @@ class ClassificationManager:
             debug_manager.log_info('哈希缓存保存成功', 'config', file=cache_file)
         except Exception as e:
             debug_manager.log_exception(e, 'config', file=cache_file)
-
-    def rename_in_hash_cache(self, old_path: str, new_path: str) -> bool:
-        """重命名哈希缓存中的所有路径引用。
-
-        更新 fields: files, duplicates, similar_groups, hash_list, file_hashes。
-        若缓存文件不存在或未找到旧路径则返回 False。
-        """
-        cache = self.load_hash_cache()
-        if not cache:
-            return False
-
-        found = False
-
-        # 1. files: 文件元信息 {path: {size, mtime}}
-        if 'files' in cache and old_path in cache['files']:
-            cache['files'][new_path] = cache['files'].pop(old_path)
-            found = True
-
-        # 2. duplicates: {md5: [paths]}
-        if 'duplicates' in cache:
-            for md5, paths in cache['duplicates'].items():
-                if old_path in paths:
-                    idx = paths.index(old_path)
-                    paths[idx] = new_path
-                    found = True
-
-        # 3. similar_groups: [[path, ...], ...]
-        if 'similar_groups' in cache:
-            for group in cache['similar_groups']:
-                if old_path in group:
-                    idx = group.index(old_path)
-                    group[idx] = new_path
-                    found = True
-
-        # 4. hash_list: [(path, img_hash), ...]（列表元组）
-        if 'hash_list' in cache:
-            for i, (p, h) in enumerate(cache['hash_list']):
-                if p == old_path:
-                    cache['hash_list'][i] = (new_path, h)
-                    found = True
-
-        # 5. file_hashes: {path: {img_hash, md5}}
-        if 'file_hashes' in cache and old_path in cache['file_hashes']:
-            cache['file_hashes'][new_path] = cache['file_hashes'].pop(old_path)
-            found = True
-
-        if found:
-            self.save_hash_cache(cache)
-            debug_manager.log_info('哈希缓存路径已更新', 'hash', old=old_path, new=new_path)
-        return found
     
     def check_files_changed(self, image_paths: list) -> tuple:
         debug_manager.log_info('检查文件变化', 'hash', file_count=len(image_paths))
@@ -642,18 +591,14 @@ class ClassificationManager:
         return True
     
     def add_shortcut(self, shortcut: str, folder_path: str) -> bool:
-        if not self.current_folder:
-            debug_manager.log_error('无法添加快捷键：未选择图片文件夹', 'config', shortcut=shortcut)
-            return False
-
         if shortcut in self.shortcut_map:
             debug_manager.log_warning('快捷键已存在', 'config', shortcut=shortcut)
             return False
-
+        
         if not self._is_valid_path(folder_path):
             debug_manager.log_error('路径验证失败', 'config', shortcut=shortcut, folder_path=folder_path)
             return False
-
+        
         if not os.path.exists(folder_path):
             try:
                 os.makedirs(folder_path)
@@ -661,26 +606,19 @@ class ClassificationManager:
             except Exception as e:
                 debug_manager.log_exception(e, 'config', folder_path=folder_path)
                 return False
-
+        
         self.shortcut_map[shortcut] = folder_path
         result = self.save_config()
         if result:
-            debug_manager.log_info('快捷键添加成功', 'config', shortcut=shortcut, folder_path=folder_path,
-                                   current_folder=self.current_folder)
+            debug_manager.log_info('快捷键添加成功', 'config', shortcut=shortcut, folder_path=folder_path)
         else:
-            # 保存失败时回滚内存中的修改，避免 shortcut_map 被污染
-            del self.shortcut_map[shortcut]
             debug_manager.log_error('快捷键保存失败', 'config', shortcut=shortcut)
         return result
     
     def remove_shortcut(self, shortcut: str) -> bool:
         if shortcut in self.shortcut_map:
-            removed_path = self.shortcut_map.pop(shortcut)
-            result = self.save_config()
-            if not result:
-                # 保存失败时回滚，避免内存与磁盘不一致
-                self.shortcut_map[shortcut] = removed_path
-            return result
+            del self.shortcut_map[shortcut]
+            return self.save_config()
         return False
     
     def get_folder(self, shortcut: str) -> Optional[str]:
@@ -689,39 +627,34 @@ class ClassificationManager:
     def get_all_shortcuts(self) -> Dict[str, str]:
         return self.shortcut_map.copy()
     
-    def classify_image(self, image_path: str, shortcut: str) -> Optional[str]:
-        """将图片移动到快捷键对应的目标文件夹。
-
-        Returns:
-            成功时返回目标路径，失败时返回 None。
-        """
+    def classify_image(self, image_path: str, shortcut: str) -> bool:
         folder_path = self.get_folder(shortcut)
         if not folder_path:
             debug_manager.log_error('找不到快捷键对应的文件夹', 'classify', shortcut=shortcut)
-            return None
-
+            return False
+        
         if not os.path.exists(folder_path):
             try:
                 os.makedirs(folder_path)
                 debug_manager.log_info('创建分类文件夹', 'classify', folder_path=folder_path)
             except Exception as e:
                 debug_manager.log_exception(e, 'classify', folder_path=folder_path)
-                return None
-
+                return False
+        
         try:
             filename = os.path.basename(image_path)
             dest_path = os.path.join(folder_path, filename)
-
+            
             counter = 1
             while os.path.exists(dest_path):
                 name, ext = os.path.splitext(filename)
                 dest_path = os.path.join(folder_path, f"{name}_{counter}{ext}")
                 counter += 1
-
+            
             import shutil
             shutil.move(image_path, dest_path)
             debug_manager.log_info('图片分类成功', 'classify', image_path=image_path, dest_path=dest_path)
-            return dest_path
+            return True
         except Exception as e:
             debug_manager.log_exception(e, 'classify', image_path=image_path, folder_path=folder_path)
-            return None
+            return False

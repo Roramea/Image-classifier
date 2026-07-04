@@ -69,8 +69,8 @@ class ClassificationService:
         failed_paths = []
 
         for path in current_group:
-            dest_path = self.classifier.classify_image(path, shortcut)
-            if dest_path:
+            success = self.classifier.classify_image(path, shortcut)
+            if success:
                 success_count += 1
                 self.processed_images.add(path)
             else:
@@ -80,40 +80,8 @@ class ClassificationService:
 
         return success_count, failed_paths
 
-    def remove_path(self, path: str) -> bool:
-        """从分组中增量移除指定路径，避免全量 os.path.exists 扫描。
-
-        Returns:
-            是否找到了并移除了该路径
-        """
-        found = False
-        new_groups = []
-        for group in self.groups:
-            if path in group:
-                found = True
-                filtered = [p for p in group if p != path]
-                if filtered:
-                    new_groups.append(filtered)
-            else:
-                new_groups.append(group)
-        if found:
-            self.groups = new_groups
-            # 校正当前索引
-            if self.current_group_index >= len(self.groups):
-                self.current_group_index = max(0, len(self.groups) - 1)
-            # 校正当前图片索引
-            if self.groups and self.current_image_index >= len(self.groups[self.current_group_index]):
-                self.current_image_index = max(0, len(self.groups[self.current_group_index]) - 1)
-            debug_manager.log_info('增量移除路径', 'classification', path=path, remaining_groups=len(self.groups))
-            return True
-        return False
-
     def refresh_groups(self):
-        """刷新分组：移除已不存在的图片路径，校正当前索引。
-
-        仅用于需要全量校验的场景（如外部修改了文件）。
-        分类等已知路径移除操作应使用 remove_path() 以获得更好性能。
-        """
+        """刷新分组：移除已不存在的图片路径，校正当前索引。"""
         debug_manager.log_info('刷新分组', 'classification', before_count=len(self.groups))
         valid_groups = []
         for group in self.groups:
@@ -124,8 +92,6 @@ class ClassificationService:
 
         if self.current_group_index >= len(self.groups):
             self.current_group_index = max(0, len(self.groups) - 1)
-        if self.groups and self.current_image_index >= len(self.groups[self.current_group_index]):
-            self.current_image_index = max(0, len(self.groups[self.current_group_index]) - 1)
         debug_manager.log_info('分组刷新完成', 'classification', after_count=len(self.groups), new_group_index=self.current_group_index)
 
     def apply_similar_groups(self, similar_groups: list) -> list:
@@ -229,31 +195,9 @@ class ClassificationService:
         return len(self.groups) == 0
 
     def mark_processed(self, path: str):
-        """标记图片为已处理并从分组中移除该路径（增量操作，性能更好）。"""
+        """标记图片为已处理并刷新分组（移除该路径）。"""
         self.processed_images.add(path)
-        self.remove_path(path)
-
-    def rename_path(self, old_path: str, new_path: str) -> bool:
-        """将分组和已处理集合中的旧路径替换为新路径。
-
-        返回是否找到了旧路径并替换成功。
-        """
-        found = False
-        # 更新 groups 中的路径
-        for i, group in enumerate(self.groups):
-            for j, img_path in enumerate(group):
-                if img_path == old_path:
-                    self.groups[i][j] = new_path
-                    found = True
-                    # 如果是当前图片，当前索引不需要变（位置没变）
-        # 更新 processed_images
-        if old_path in self.processed_images:
-            self.processed_images.remove(old_path)
-            self.processed_images.add(new_path)
-            found = True
-        if found:
-            debug_manager.log_info('路径重命名', 'classification', old=old_path, new=new_path)
-        return found
+        self.refresh_groups()
 
     def reset(self):
         """重置所有状态。"""

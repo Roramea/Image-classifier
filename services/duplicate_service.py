@@ -115,22 +115,6 @@ class DuplicateService:
         """是否所有重复组都已处理完成。"""
         return len(self.duplicates) == 0
 
-    def rename_path(self, old_path: str, new_path: str) -> bool:
-        """将重复图片数据中的旧路径替换为新路径。
-
-        更新 duplicates 字典中所有出现旧路径的条目。
-        返回是否找到了旧路径并替换成功。
-        """
-        found = False
-        for md5_hash, paths in self.duplicates.items():
-            if old_path in paths:
-                idx = paths.index(old_path)
-                paths[idx] = new_path
-                found = True
-        if found:
-            debug_manager.log_info('重复图片路径重命名', 'duplicate', old=old_path, new=new_path)
-        return found
-
     def clear_all_duplicate_memory(self):
         """清空 classifier 中已处理重复组的记忆。"""
         self.classifier.clear_duplicate_memory()

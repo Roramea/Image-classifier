@@ -38,18 +38,10 @@ class HashAnalysisDialog(QDialog):
         """
         super().__init__(parent)
         self.setWindowTitle("图片相似度分析")
-        self.setFixedSize(550, 400)
+        self.setFixedSize(550, 360)
         self.setModal(False)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         self.setWindowModality(Qt.NonModal)
-        self.setStyleSheet("""
-            QDialog {
-                background-color: #2d2d2d;
-            }
-            QLabel {
-                color: #ecf0f1;
-            }
-        """)
 
         self.hash_service = hash_service
         self.total_count = total_count
@@ -77,7 +69,7 @@ class HashAnalysisDialog(QDialog):
 
         threshold_label = QLabel("相似度阈值:")
         threshold_label.setFont(QFont("Microsoft YaHei", 10))
-        threshold_label.setStyleSheet("color: #95a5a6;")
+        threshold_label.setStyleSheet("color: #666666;")
         threshold_layout.addWidget(threshold_label)
 
         self.threshold_slider = QSlider(Qt.Horizontal)
@@ -87,34 +79,11 @@ class HashAnalysisDialog(QDialog):
         self.threshold_slider.setTickPosition(QSlider.TicksBelow)
         self.threshold_slider.setTickInterval(1)
         self.threshold_slider.valueChanged.connect(self.on_threshold_changed)
-        self.threshold_slider.setStyleSheet("""
-            QSlider::groove:horizontal {
-                height: 6px;
-                background: #1e1e1e;
-                border-radius: 3px;
-            }
-            QSlider::handle:horizontal {
-                background: #3498db;
-                border: 2px solid #2980b9;
-                width: 16px;
-                margin: -5px 0;
-                border-radius: 8px;
-            }
-            QSlider::sub-page:horizontal {
-                background: #3498db;
-                border-radius: 3px;
-            }
-            QSlider::tick:horizontal {
-                background: #7f8c8d;
-                width: 1px;
-                height: 6px;
-            }
-        """)
         threshold_layout.addWidget(self.threshold_slider)
 
         self.threshold_value_label = QLabel(f"{self.threshold}")
         self.threshold_value_label.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
-        self.threshold_value_label.setStyleSheet("color: #3498db; min-width: 30px;")
+        self.threshold_value_label.setStyleSheet("color: #4a90d9; min-width: 30px;")
         self.threshold_value_label.setAlignment(Qt.AlignCenter)
         threshold_layout.addWidget(self.threshold_value_label)
 
@@ -122,7 +91,7 @@ class HashAnalysisDialog(QDialog):
 
         threshold_hint = QLabel("阈值越小，相似度要求越高（2-25，默认10）")
         threshold_hint.setFont(QFont("Microsoft YaHei", 9))
-        threshold_hint.setStyleSheet("color: #7f8c8d;")
+        threshold_hint.setStyleSheet("color: #999999;")
         threshold_hint.setAlignment(Qt.AlignCenter)
         layout.addWidget(threshold_hint)
 
@@ -132,15 +101,14 @@ class HashAnalysisDialog(QDialog):
         self.progress_bar.setTextVisible(True)
         self.progress_bar.setStyleSheet("""
             QProgressBar {
-                border: 1px solid #34495e;
+                border: 2px solid #cccccc;
                 border-radius: 5px;
                 text-align: center;
                 font-size: 12px;
-                color: #ecf0f1;
-                background-color: #1e1e1e;
+                color: #333333;
             }
             QProgressBar::chunk {
-                background-color: #3498db;
+                background-color: #4a90d9;
                 border-radius: 3px;
             }
         """)
@@ -156,19 +124,19 @@ class HashAnalysisDialog(QDialog):
 
         stage_label_text = QLabel("阶段:")
         stage_label_text.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
-        stage_label_text.setStyleSheet("color: #95a5a6;")
+        stage_label_text.setStyleSheet("color: #666666;")
         stage_layout.addWidget(stage_label_text)
 
         self.stage_label = QLabel("准备中...")
         self.stage_label.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
-        self.stage_label.setStyleSheet("color: #3498db;")
+        self.stage_label.setStyleSheet("color: #4a90d9;")
         stage_layout.addWidget(self.stage_label)
 
         stage_layout.addStretch()
 
         self.time_label = QLabel("预计剩余: --")
         self.time_label.setFont(QFont("Microsoft YaHei", 10))
-        self.time_label.setStyleSheet("color: #95a5a6;")
+        self.time_label.setStyleSheet("color: #666666;")
         stage_layout.addWidget(self.time_label)
 
         layout.addLayout(stage_layout)
@@ -179,13 +147,12 @@ class HashAnalysisDialog(QDialog):
         self.current_stage_progress.setTextVisible(False)
         self.current_stage_progress.setStyleSheet("""
             QProgressBar {
-                border: 1px solid #34495e;
+                border: 1px solid #e0e0e0;
                 border-radius: 3px;
                 height: 6px;
-                background-color: #1e1e1e;
             }
             QProgressBar::chunk {
-                background-color: #3498db;
+                background-color: #7db3e8;
                 border-radius: 2px;
             }
         """)
@@ -198,7 +165,7 @@ class HashAnalysisDialog(QDialog):
         self.file_label = QLabel("")
         self.file_label.setWordWrap(True)
         self.file_label.setAlignment(Qt.AlignLeft)
-        self.file_label.setStyleSheet("color: #ecf0f1; font-size: 12px; background-color: #1e1e1e; padding: 8px; border: 1px solid #34495e; border-radius: 4px; min-height: 40px;")
+        self.file_label.setStyleSheet("color: #333333; font-size: 12px; background-color: #f5f5f5; padding: 8px; border-radius: 4px; min-height: 40px;")
         layout.addWidget(self.file_label)
 
         speed_layout = QHBoxLayout()
@@ -206,12 +173,12 @@ class HashAnalysisDialog(QDialog):
 
         self.speed_label = QLabel("处理速度: --")
         self.speed_label.setFont(QFont("Microsoft YaHei", 10))
-        self.speed_label.setStyleSheet("color: #95a5a6;")
+        self.speed_label.setStyleSheet("color: #666666;")
         speed_layout.addWidget(self.speed_label)
 
         self.elapsed_label = QLabel("已用时: --")
         self.elapsed_label.setFont(QFont("Microsoft YaHei", 10))
-        self.elapsed_label.setStyleSheet("color: #95a5a6;")
+        self.elapsed_label.setStyleSheet("color: #666666;")
         speed_layout.addWidget(self.elapsed_label)
 
         layout.addLayout(speed_layout)
