@@ -61,7 +61,7 @@ class MainPresenter:
         )
 
     def on_unfinished_session_continue(self, folder_path):
-        self.start_scanning(folder_path)
+        self._start_scanning(folder_path)
 
     def on_unfinished_session_cancel(self):
         self.classifier.clear_unfinished_session()
@@ -74,23 +74,17 @@ class MainPresenter:
             debug_manager.log_info('用户取消选择文件夹', 'folder')
             return
         debug_manager.log_info('用户选择文件夹', 'folder', folder_path=folder_path)
-        self.start_scanning(folder_path)
+        self._start_scanning(folder_path)
 
-    def start_scanning(self, folder_path: str):
-        """启动文件夹扫描流程。
-
-        公开方法，供 View 层（如最近文件夹选择）和内部回调统一调用。
-        设置状态、重置哈希列表、启动后台扫描线程。
-        """
+    def _start_scanning(self, folder_path: str):
         self.view.set_status("正在扫描图片...")
         self.view.hide_threshold_group()
         self.hash_list = []
 
         self.scan_thread = ScanThread(folder_path)
-        # 使用 Qt 信号连接，自动跨线程调度到主线程执行
-        self.scan_thread.progress.connect(self.on_scan_progress)
-        self.scan_thread.finished.connect(self.on_scan_finished)
-        self.scan_thread.error.connect(self.on_scan_error)
+        self.scan_thread.progress_updated.connect(self.on_scan_progress)
+        self.scan_thread.scanning_finished.connect(self.on_scan_finished)
+        self.scan_thread.error_occurred.connect(self.on_scan_error)
         self.scan_thread.start()
 
     def on_scan_progress(self, current: int, total: int):
@@ -147,12 +141,8 @@ class MainPresenter:
         cached_file_hashes = cache.get('file_hashes', {})
         debug_manager.log_info('加载缓存文件哈希', 'hash', cached_count=len(cached_file_hashes))
         
-        hash_service = HashAnalysisService(threshold)
-        hash_service.image_paths = image_paths
-        hash_service.set_cached_hashes(cached_file_hashes)
-
         self.view.show_hash_analysis_dialog(
-            hash_service,
+            image_paths, threshold, cached_file_hashes,
             self.on_hash_progress_update,
             self.on_hash_finished,
             self.on_hash_canceled,
@@ -169,27 +159,24 @@ class MainPresenter:
         self.view.update_threshold(threshold)
 
     def on_threshold_changed(self, threshold: int):
-        """主窗口阈值变化（防抖后触发）：执行重分组等重量级操作。
-
-        View 层已即时更新数字显示并防抖，此处无需再调用 update_threshold_display。
-        """
         debug_manager.log_info('主窗口阈值变化', 'hash', threshold=threshold)
         self.classifier.set_hash_threshold(threshold)
-
+        self.view.update_threshold_display(threshold)
+        
         if self.hash_completed and self.hash_list:
             debug_manager.log_info('重新分组', 'hash', threshold=threshold, hash_count=len(self.hash_list))
-            # 调用 HashAnalysisService 的无状态静态方法重新分组，耦合度低可接受
             groups = HashAnalysisService.group_by_similarity(self.hash_list, threshold)
             self._apply_groups(groups)
-
+            
             all_image_paths = []
             for group in groups:
                 all_image_paths.extend(group)
-            cache = self.classifier.build_hash_cache(
-                all_image_paths, groups, self.duplicate_service.get_duplicates(), self.hash_list
-            )
+            cache = self.classifier.create_file_cache(all_image_paths)
+            cache['duplicates'] = self.duplicate_service.get_duplicates()
+            cache['similar_groups'] = groups
+            cache['hash_list'] = self.hash_list
             self.classifier.save_hash_cache(cache)
-
+            
             self.view.show_current_image()
             self.view.update_duplicate_list(self.duplicate_service.get_duplicates())
             self._update_hash_status(groups, self.duplicate_service.get_duplicates())
@@ -208,7 +195,7 @@ class MainPresenter:
         debug_manager.log_info('哈希分析完成', 'hash', group_count=len(groups), duplicate_groups=len(duplicates))
         self.hash_scanning = False
         self.hash_completed = True
-
+        
         if hash_list:
             self.hash_list = hash_list
             debug_manager.log_info('保存哈希列表', 'hash', hash_count=len(hash_list))
@@ -219,7 +206,30 @@ class MainPresenter:
         all_image_paths = []
         for group in self.classification_service.get_groups():
             all_image_paths.extend(group)
-        cache = self.classifier.build_hash_cache(all_image_paths, groups, duplicates, hash_list)
+        cache = self.classifier.create_file_cache(all_image_paths)
+        cache['duplicates'] = duplicates
+        cache['similar_groups'] = groups
+        
+        if hash_list:
+            cache['hash_list'] = hash_list
+            file_hashes = {}
+            for path, img_hash in hash_list:
+                file_hashes[path] = {'img_hash': img_hash}
+            cache['file_hashes'] = file_hashes
+        
+        md5_hash_map = {}
+        for md5, paths in duplicates.items():
+            for path in paths:
+                if path not in md5_hash_map:
+                    md5_hash_map[path] = md5
+        if md5_hash_map:
+            if 'file_hashes' not in cache:
+                cache['file_hashes'] = {}
+            for path, md5 in md5_hash_map.items():
+                if path not in cache['file_hashes']:
+                    cache['file_hashes'][path] = {}
+                cache['file_hashes'][path]['md5'] = md5
+        
         debug_manager.log_info('保存哈希缓存', 'hash', file_hashes_count=len(cache.get('file_hashes', {})))
         self.classifier.save_hash_cache(cache)
 
@@ -229,13 +239,28 @@ class MainPresenter:
         self._update_hash_status(groups, duplicates)
 
     def _apply_groups(self, groups: list):
-        """应用相似度分组到分类服务。
-
-        委托给 ClassificationService.apply_similar_groups，封装"过滤已处理图片 +
-        未分组图片单独成组"的逻辑，避免表现层直接操作 service 内部状态。
-        """
-        self.classification_service.apply_similar_groups(groups)
-        debug_manager.log_info('最终分组', 'hash', final_group_count=len(self.classification_service.get_groups()))
+        current_groups = self.classification_service.get_groups()
+        processed_images = self.classification_service.processed_images
+        
+        if not groups:
+            debug_manager.log_info('未找到相似图片，保留原始分组', 'hash', original_group_count=len(current_groups))
+            filtered_groups = current_groups
+        else:
+            filtered_groups = []
+            similar_images = set()
+            for group in groups:
+                filtered_group = [path for path in group if path not in processed_images]
+                if filtered_group:
+                    filtered_groups.append(filtered_group)
+                    similar_images.update(filtered_group)
+            
+            for group in current_groups:
+                for path in group:
+                    if path not in similar_images and path not in processed_images:
+                        filtered_groups.append([path])
+        
+        debug_manager.log_info('最终分组', 'hash', final_group_count=len(filtered_groups))
+        self.classification_service.set_groups(filtered_groups)
 
     def _update_hash_status(self, groups: list, duplicates: dict):
         if duplicates:
@@ -281,7 +306,7 @@ class MainPresenter:
 
     def next_image(self):
         current_index = self.classification_service.current_image_index
-        current_group = self.classification_service.get_current_group()
+        current_group = self.classification_service.current_group
         
         if current_index < len(current_group) - 1:
             self.classification_service.next_image()
@@ -333,7 +358,7 @@ class MainPresenter:
         return self.group_rotations.get(current_group_index, 0)
 
     def classify_image(self, category: str):
-        current_path = self.classification_service.get_current_image()
+        current_path = self.classification_service.get_current_image_path()
         if not current_path:
             return
         
@@ -428,50 +453,27 @@ class MainPresenter:
 
         self.view.show_duplicate_detail_dialog(selected_groups, selected_md5s, self.on_duplicate_detail_closed)
 
-    def on_duplicate_detail_closed(self, deletions: list):
-        """详情对话框关闭后，通过 service 执行删除。
-
-        替代旧实现中直接修改 duplicate_service.duplicates 字典的做法，
-        改用 DuplicateService.delete_selected_duplicates 统一处理文件删除、
-        记忆保存和状态更新，保证数据一致性。
-
-        Args:
-            deletions: [(md5_hash, [selected_paths]), ...] 列表，由对话框返回
-        """
-        if not deletions:
-            return
-
-        debug_manager.log_info('执行详情对话框删除', 'duplicate', group_count=len(deletions))
-
-        for md5_hash, selected_paths in deletions:
-            deleted_paths, failed_paths = self.duplicate_service.delete_selected_duplicates(
-                md5_hash, selected_paths
-            )
-            for path in failed_paths:
-                self.view.show_warning_message(f"删除失败: {path}")
-
-        self.view.update_duplicate_list(self.duplicate_service.get_duplicates())
-        self.view.refresh_groups()
-
-        if self.duplicate_service.is_all_processed():
-            self.view.set_status("所有重复图片已处理完成")
-            self.duplicate_service.clear_all_duplicate_memory()
+    def on_duplicate_detail_closed(self, result, selected_md5s):
+        if result:
+            for md5_hash in selected_md5s:
+                if md5_hash and md5_hash in self.duplicate_service.get_duplicates():
+                    del self.duplicate_service.duplicates[md5_hash]
+            
+            self.view.update_duplicate_list(self.duplicate_service.get_duplicates())
+            self.view.refresh_groups()
 
     def clear_storage(self):
-        """清理存储：先从 classifier 获取数据 → 传给 view → 收到选中类别后执行清理。"""
-        storage_size = self.classifier.get_storage_size()
-        storage_details = self.classifier.get_storage_details()
-        selected_categories = self.view.show_storage_clean_dialog(storage_size, storage_details)
-        if selected_categories:
-            self.classifier.clear_categories(selected_categories)
+        result = self.view.show_storage_clean_dialog()
+        if result:
+            self.classifier.clear_storage()
             self.view.show_info_message("存储已清理")
-            self.view.update_shortcuts(self.classifier.get_all_shortcuts())
+            self.view.update_shortcuts({})
 
     def get_groups(self) -> list:
         return self.classification_service.get_groups()
 
     def get_current_image_path(self) -> Optional[str]:
-        return self.classification_service.get_current_image()
+        return self.classification_service.get_current_image_path()
 
     def get_current_group_index(self) -> int:
         return self.classification_service.current_group_index
@@ -483,13 +485,10 @@ class MainPresenter:
         return len(self.classification_service.get_groups())
 
     def get_current_group_size(self) -> int:
-        return len(self.classification_service.get_current_group())
+        return len(self.classification_service.current_group)
 
     def get_duplicates(self) -> dict:
         return self.duplicate_service.get_duplicates()
 
     def get_hash_threshold(self) -> int:
         return self.classifier.get_hash_threshold()
-
-    def get_recent_folders(self) -> list:
-        return self.classifier.get_recent_folders()

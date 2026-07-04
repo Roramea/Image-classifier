@@ -284,59 +284,11 @@ class ClassificationManager:
                 }
             except Exception as e:
                 debug_manager.log_warning('获取文件信息失败', 'hash', path=path, error=str(e))
-
+        
         cache = {
             'files': files,
             'timestamp': datetime.now().isoformat()
         }
-        return cache
-
-    def build_hash_cache(self, image_paths: list, groups: list, duplicates: dict,
-                         hash_list: list = None) -> dict:
-        """构建完整的哈希缓存数据结构。
-
-        封装缓存格式知识，避免表现层直接操作缓存内部结构。包含：
-        - files: 文件元信息（size/mtime），用于变更检测
-        - duplicates: 重复图片映射 {md5: [paths]}
-        - similar_groups: 相似度分组 [[path, ...], ...]
-        - hash_list: 图像哈希列表 [(path, img_hash), ...]（用于阈值调整时重新分组）
-        - file_hashes: 文件哈希映射 {path: {'img_hash': str, 'md5': str}}（用于增量计算）
-
-        Args:
-            image_paths: 当前所有图片路径
-            groups: 相似度分组结果
-            duplicates: 重复图片字典
-            hash_list: 图像哈希列表（可选，无则不写入 hash_list 和 file_hashes 的 img_hash 字段）
-
-        Returns:
-            完整的缓存字典，可直接传给 save_hash_cache 持久化
-        """
-        debug_manager.log_info('构建哈希缓存', 'hash',
-                               file_count=len(image_paths),
-                               group_count=len(groups),
-                               duplicate_count=len(duplicates),
-                               has_hash_list=hash_list is not None)
-        cache = self.create_file_cache(image_paths)
-        cache['duplicates'] = duplicates
-        cache['similar_groups'] = groups
-
-        if hash_list:
-            cache['hash_list'] = hash_list
-            file_hashes = {path: {'img_hash': img_hash} for path, img_hash in hash_list}
-            cache['file_hashes'] = file_hashes
-
-            # 构建 path -> md5 反向映射，补充到 file_hashes
-            # 这样下次扫描时可以直接从缓存读取 md5，避免重新计算
-            md5_hash_map = {}
-            for md5, paths in duplicates.items():
-                for path in paths:
-                    if path not in md5_hash_map:
-                        md5_hash_map[path] = md5
-            for path, md5 in md5_hash_map.items():
-                if path not in cache['file_hashes']:
-                    cache['file_hashes'][path] = {}
-                cache['file_hashes'][path]['md5'] = md5
-
         return cache
     
     def save_unfinished_session(self, session_data: dict):

@@ -1,14 +1,52 @@
 import time
 from typing import List, Dict
-from threading import Thread
+
+from PyQt5.QtCore import QObject, pyqtSignal
 
 from core.image_scanner import ImageScanner
 from core.simple_hash import hamming_distance
 from core.debug_manager import debug_manager
-from core.observer import Observer
 
 
-class HashAnalysisService(Observer):
+class HashAnalysisService(QObject):
+    progress_updated = pyqtSignal(int, int, str, str, int, int)
+    analysis_finished = pyqtSignal(list, dict, list)
+    analysis_canceled = pyqtSignal()
+    analysis_error = pyqtSignal(str)
+    analysis_stage_changed = pyqtSignal(str, int, int)
+    analysis_file_processed = pyqtSignal(str, int, int)
+    
+    @staticmethod
+    def group_by_similarity(hash_list: list, threshold: int) -> list:
+        visited = set()
+        groups = []
+        
+        for i, (path1, hash1) in enumerate(hash_list):
+            if path1 in visited:
+                continue
+            
+            group = [path1]
+            visited.add(path1)
+            
+            try:
+                for j in range(i + 1, len(hash_list)):
+                    path2, hash2 = hash_list[j]
+                    if path2 not in visited:
+                        from core.simple_hash import hamming_distance
+                        diff = hamming_distance(hash1, hash2)
+                        if diff <= threshold:
+                            group.append(path2)
+                            visited.add(path2)
+            except Exception as group_ex:
+                debug_manager.log_warning('相似度分组失败', 'hash', filename=path1, error=str(group_ex))
+                continue
+            
+            if len(group) > 1:
+                groups.append(group)
+        
+        groups.sort(key=lambda x: len(x), reverse=True)
+        return groups
+
     STAGE_NAMES = ["计算 MD5 哈希", "计算图像哈希", "分组相似度图片"]
 
     def __init__(self, threshold: int = 10):
@@ -32,6 +70,7 @@ class HashAnalysisService(Observer):
         self.is_canceled = False
         self.current_stage = 0
 
+        from threading import Thread
         thread = Thread(target=self._run_analysis_safe, daemon=True)
         thread.start()
 
@@ -43,9 +82,9 @@ class HashAnalysisService(Observer):
             self.run_analysis()
         except Exception as e:
             debug_manager.log_exception(e, 'hash', context='线程异常')
-            self.emit('analysis_error', f"线程异常: {str(e)}")
+            self.analysis_error.emit(f"线程异常: {str(e)}")
             if not self.is_canceled:
-                self.emit('analysis_finished', [], {}, [])
+                self.analysis_finished.emit([], {})
 
     def run_analysis(self):
         scanner = ImageScanner()
@@ -87,7 +126,7 @@ class HashAnalysisService(Observer):
         self.current_stage = 1
         stage_name = self.STAGE_NAMES[0]
         debug_manager.log_info(f'开始{stage_name}', 'hash', total_images=len(self.image_paths), need_recalc=len(need_md5_recalc))
-        self.emit('analysis_stage_changed', stage_name, 0, len(self.image_paths))
+        self.analysis_stage_changed.emit(stage_name, 0, len(self.image_paths))
 
         md5_hash_map = cached_md5_map.copy()
         processed_count = len(self.image_paths) - len(need_md5_recalc)
@@ -95,14 +134,14 @@ class HashAnalysisService(Observer):
         for i, path in enumerate(need_md5_recalc):
             if self.is_canceled:
                 debug_manager.log_info('哈希分析已取消', 'hash')
-                self.emit('analysis_canceled')
+                self.analysis_canceled.emit()
                 return
 
             filename = self._extract_filename(path)
             progress = processed_count + i + 1
             stage_progress = int(progress / len(self.image_paths) * 100)
             self._emit_progress(progress, total_steps, stage_name, filename, progress, stage_progress)
-            self.emit('analysis_file_processed', filename, progress, len(self.image_paths))
+            self.analysis_file_processed.emit(filename, progress, len(self.image_paths))
 
             try:
                 md5 = scanner.compute_md5(path)
@@ -121,7 +160,7 @@ class HashAnalysisService(Observer):
         self.current_stage = 2
         stage_name = self.STAGE_NAMES[1]
         debug_manager.log_info(f'开始{stage_name}', 'hash', total_images=len(self.image_paths), need_recalc=len(need_img_hash_recalc))
-        self.emit('analysis_stage_changed', stage_name, 0, len(self.image_paths))
+        self.analysis_stage_changed.emit(stage_name, 0, len(self.image_paths))
         self._emit_progress(len(self.image_paths), total_steps, stage_name, "", len(self.image_paths), 0)
 
         hash_list = cached_hash_list.copy()
@@ -130,14 +169,14 @@ class HashAnalysisService(Observer):
         for i, path in enumerate(need_img_hash_recalc):
             if self.is_canceled:
                 debug_manager.log_info('哈希分析已取消', 'hash')
-                self.emit('analysis_canceled')
+                self.analysis_canceled.emit()
                 return
 
             filename = self._extract_filename(path)
             progress = len(self.image_paths) + processed_count + i + 1
             stage_progress = int((processed_count + i + 1) / len(self.image_paths) * 100)
             self._emit_progress(progress, total_steps, stage_name, filename, progress, stage_progress)
-            self.emit('analysis_file_processed', filename, processed_count + i + 1, len(self.image_paths))
+            self.analysis_file_processed.emit(filename, processed_count + i + 1, len(self.image_paths))
 
             try:
                 img_hash = scanner.compute_image_hash(path)
@@ -153,7 +192,7 @@ class HashAnalysisService(Observer):
         stage_name = self.STAGE_NAMES[2]
         hash_count = len(hash_list)
         debug_manager.log_info(f'开始{stage_name}', 'hash', hash_count=hash_count)
-        self.emit('analysis_stage_changed', stage_name, 0, hash_count)
+        self.analysis_stage_changed.emit(stage_name, 0, hash_count)
         self._emit_progress(len(self.image_paths) * 2, total_steps, stage_name, "", len(self.image_paths) * 2, 0)
 
         visited = set()
@@ -162,7 +201,7 @@ class HashAnalysisService(Observer):
         for i, (path1, hash1) in enumerate(hash_list):
             if self.is_canceled:
                 debug_manager.log_info('哈希分析已取消', 'hash')
-                self.emit('analysis_canceled')
+                self.analysis_canceled.emit()
                 return
 
             if path1 in visited:
@@ -175,7 +214,7 @@ class HashAnalysisService(Observer):
             progress = len(self.image_paths) * 2 + i + 1
             stage_progress = int((i + 1) / hash_count * 100) if hash_count > 0 else 100
             self._emit_progress(progress, total_steps, stage_name, filename, progress, stage_progress)
-            self.emit('analysis_file_processed', filename, i + 1, hash_count)
+            self.analysis_file_processed.emit(filename, i + 1, hash_count)
 
             try:
                 for j in range(i + 1, len(hash_list)):
@@ -196,41 +235,11 @@ class HashAnalysisService(Observer):
         debug_manager.log_info(f'{stage_name}完成', 'hash', group_count=len(groups))
 
         if not self.is_canceled:
-            self.emit('analysis_finished', groups, duplicates, hash_list)
+            self.analysis_finished.emit(groups, duplicates, hash_list)
 
     def _emit_progress(self, current: int, total: int, stage_name: str, filename: str, processed_count: int, stage_progress: int):
-        self.emit('progress_updated', current, total, stage_name, filename, processed_count, stage_progress)
+        self.progress_updated.emit(current, total, stage_name, filename, processed_count, stage_progress)
 
     @staticmethod
     def _extract_filename(path: str) -> str:
         return path.split('/')[-1] if '/' in path else path.split('\\')[-1]
-
-    @staticmethod
-    def group_by_similarity(hash_list: list, threshold: int) -> list:
-        visited = set()
-        groups = []
-        
-        for i, (path1, hash1) in enumerate(hash_list):
-            if path1 in visited:
-                continue
-            
-            group = [path1]
-            visited.add(path1)
-            
-            try:
-                for j in range(i + 1, len(hash_list)):
-                    path2, hash2 = hash_list[j]
-                    if path2 not in visited:
-                        diff = hamming_distance(hash1, hash2)
-                        if diff <= threshold:
-                            group.append(path2)
-                            visited.add(path2)
-            except Exception as group_ex:
-                debug_manager.log_warning('相似度分组失败', 'hash', filename=path1, error=str(group_ex))
-                continue
-            
-            if len(group) > 1:
-                groups.append(group)
-        
-        groups.sort(key=lambda x: len(x), reverse=True)
-        return groups

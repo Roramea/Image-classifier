@@ -4,19 +4,11 @@ from PyQt5.QtWidgets import QDialog, QLabel, QProgressBar, QVBoxLayout, QWidget,
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont
 
+from services.hash_analysis_service import HashAnalysisService
 from core.debug_manager import debug_manager
 
 
 class HashAnalysisDialog(QDialog):
-    """哈希分析进度对话框。
-
-    职责：展示分析进度、阶段、剩余时间；让用户调整阈值；接收取消请求。
-    通过 Observer 模式订阅 hash_service 的事件更新进度（这是正确的解耦方向）；
-    通过信号向 Presenter 上报用户操作（阈值调整、取消请求），不直接调用 service 的状态修改方法。
-
-    注：start_analysis 仍由 showEvent 直接触发，因对话框管理自身显示生命周期，可接受。
-    """
-
     progress_updated_signal = pyqtSignal(int, int, str, str, int, int)
     analysis_finished_signal = pyqtSignal(list, dict, list)
     analysis_canceled_signal = pyqtSignal()
@@ -24,18 +16,8 @@ class HashAnalysisDialog(QDialog):
     analysis_stage_changed_signal = pyqtSignal(str, int, int)
     analysis_file_processed_signal = pyqtSignal(str, int, int)
     threshold_changed = pyqtSignal(int)
-    # 用户请求取消时发出，由 Presenter 连接到 hash_service.cancel
-    cancel_requested = pyqtSignal()
 
-    def __init__(self, hash_service, total_count: int, initial_threshold: int, parent=None):
-        """初始化对话框。
-
-        Args:
-            hash_service: 哈希分析服务实例（仅用于订阅事件和启动分析，不直接修改其状态）
-            total_count: 图片总数（替代直接读取 hash_service.image_paths）
-            initial_threshold: 初始相似度阈值（替代直接读取 hash_service.threshold）
-            parent: 父组件
-        """
+    def __init__(self, image_paths: list, threshold: int = 10, parent=None):
         super().__init__(parent)
         self.setWindowTitle("图片相似度分析")
         self.setFixedSize(550, 360)
@@ -43,17 +25,21 @@ class HashAnalysisDialog(QDialog):
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         self.setWindowModality(Qt.NonModal)
 
-        self.hash_service = hash_service
-        self.total_count = total_count
+        self.image_paths = image_paths
+        self.total_count = len(image_paths)
         self.start_time = None
         self.is_canceled = False
-        # 本地跟踪阶段，替代直接读取 hash_service.current_stage
-        self._current_stage = 0
-        self.threshold = initial_threshold
+        self.current_stage = 0
+        self.threshold = threshold
+
+        self.hash_service = HashAnalysisService(threshold)
 
         self.init_ui()
         self.connect_signals()
     
+    def set_cached_hashes(self, cached_hashes: dict):
+        self.hash_service.set_cached_hashes(cached_hashes)
+
     def init_ui(self):
         layout = QVBoxLayout()
         layout.setContentsMargins(20, 20, 20, 20)
@@ -186,46 +172,12 @@ class HashAnalysisDialog(QDialog):
         self.setLayout(layout)
 
     def connect_signals(self):
-        """订阅 service 事件并连接 Qt 信号。
-
-        Observer 回调在 service 的后台线程中执行，不能直接操作 UI。
-        因此 Observer 回调只 emit Qt 信号，Qt 信号跨线程时自动使用队列连接，
-        槽函数在主线程执行，避免线程违规。
-        """
-        # Observer 回调（后台线程）-> emit Qt 信号
-        self.hash_service.on('progress_updated', self._relay_progress_updated)
-        self.hash_service.on('analysis_finished', self._relay_analysis_finished)
-        self.hash_service.on('analysis_canceled', self._relay_analysis_canceled)
-        self.hash_service.on('analysis_error', self._relay_analysis_error)
-        self.hash_service.on('analysis_stage_changed', self._relay_stage_changed)
-        self.hash_service.on('analysis_file_processed', self._relay_file_processed)
-
-        # Qt 信号 -> UI 更新方法（主线程执行，自动跨线程队列）
-        self.progress_updated_signal.connect(self.on_update_progress)
-        self.analysis_finished_signal.connect(self.on_analysis_finished)
-        self.analysis_canceled_signal.connect(self.on_analysis_canceled)
-        self.analysis_error_signal.connect(self.on_analysis_error)
-        self.analysis_stage_changed_signal.connect(self.on_stage_changed)
-
-    # --- Observer 回调中转方法（后台线程执行，仅 emit 信号）---
-
-    def _relay_progress_updated(self, current, total, stage_name, filename, processed_count, stage_progress=0):
-        self.progress_updated_signal.emit(current, total, stage_name, filename, processed_count, stage_progress)
-
-    def _relay_analysis_finished(self, groups, duplicates, hash_list=None):
-        self.analysis_finished_signal.emit(groups, duplicates, hash_list if hash_list else [])
-
-    def _relay_analysis_canceled(self):
-        self.analysis_canceled_signal.emit()
-
-    def _relay_analysis_error(self, error):
-        self.analysis_error_signal.emit(error)
-
-    def _relay_stage_changed(self, stage, current, total):
-        self.analysis_stage_changed_signal.emit(stage, current, total)
-
-    def _relay_file_processed(self, filename, current, total):
-        self.analysis_file_processed_signal.emit(filename, current, total)
+        self.hash_service.progress_updated.connect(self.on_update_progress)
+        self.hash_service.analysis_finished.connect(self.on_analysis_finished)
+        self.hash_service.analysis_canceled.connect(self.on_analysis_canceled)
+        self.hash_service.analysis_error.connect(self.on_analysis_error)
+        self.hash_service.analysis_stage_changed.connect(self.on_stage_changed)
+        self.hash_service.analysis_file_processed.connect(self.on_file_processed)
 
     def showEvent(self, event):
         debug_manager.log_info('哈希对话框显示', 'hash')
@@ -236,22 +188,18 @@ class HashAnalysisDialog(QDialog):
         debug_manager.log_info('开始哈希分析', 'hash', image_count=self.total_count, threshold=self.threshold)
         self.start_time = time.time()
         self.is_canceled = False
-        self._current_stage = 0
+        self.current_stage = 0
 
-        self.hash_service.start_analysis(self.hash_service.image_paths)
+        self.hash_service.start_analysis(self.image_paths)
 
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_time_display)
         self.timer.start(500)
     
     def on_threshold_changed(self, value: int):
-        """用户调整阈值：仅更新本地显示并上报信号，不直接修改 service 状态。
-
-        service 的阈值更新由 Presenter 的 on_hash_threshold_changed 回调统一处理，
-        保证数据流向单一（View -> Presenter -> Service）。
-        """
         self.threshold = value
         self.threshold_value_label.setText(str(value))
+        self.hash_service.set_threshold(value)
         self.threshold_changed.emit(value)
         debug_manager.log_info('用户调整相似度阈值', 'hash', threshold=value)
 
@@ -262,8 +210,7 @@ class HashAnalysisDialog(QDialog):
         percentage = int((current / total) * 100) if total > 0 else 0
         self.progress_text.setText(f"{current} / {total} ({percentage}%)")
 
-        # 使用本地跟踪的 stage，替代直接读取 hash_service.current_stage
-        self.stage_label.setText(f"{self._current_stage}/3: {stage_name}")
+        self.stage_label.setText(f"{self.hash_service.current_stage}/3: {stage_name}")
         self.current_stage_progress.setValue(stage_progress)
 
         if filename:
@@ -325,43 +272,34 @@ class HashAnalysisDialog(QDialog):
             self.elapsed_label.setText(self._format_elapsed_time(elapsed))
 
     def on_analysis_finished(self, groups: list, duplicates: dict, hash_list: list = None):
-        """分析完成回调（主线程执行）：停止计时器并关闭对话框。
-
-        信号由 _relay_analysis_finished 在后台线程 emit，Qt 队列到主线程执行此方法。
-        Presenter 的 on_hash_finished 也通过 analysis_finished_signal 连接，同样在主线程执行。
-        """
         debug_manager.log_info('哈希分析完成', 'hash', group_count=len(groups), duplicate_groups=len(duplicates))
         self.timer.stop()
-        # 标记已结束，防止 closeEvent 再次触发取消请求
-        self.is_canceled = True
+        self.analysis_finished_signal.emit(groups, duplicates, hash_list)
         self.accept()
 
     def on_analysis_canceled(self):
-        """分析取消回调（主线程执行）：停止计时器并关闭对话框。"""
         self.is_canceled = True
         self.timer.stop()
+        self.analysis_canceled_signal.emit()
         self.accept()
 
     def on_analysis_error(self, error: str):
-        """分析出错回调（主线程执行）：停止计时器并关闭对话框。"""
         self.timer.stop()
         debug_manager.log_error('哈希分析出错', 'hash', error=error)
-        # 标记已结束，防止 closeEvent 再次触发取消请求
-        self.is_canceled = True
+        self.analysis_error_signal.emit(error)
         self.accept()
 
     def on_stage_changed(self, stage: str, current: int, total: int):
-        """阶段变更回调（主线程执行）：本地递增 _current_stage 用于显示。"""
-        self._current_stage += 1
         debug_manager.log_info('哈希分析阶段变更', 'hash', stage=stage, current=current, total=total)
+        self.analysis_stage_changed_signal.emit(stage, current, total)
+
+    def on_file_processed(self, filename: str, current: int, total: int):
+        debug_manager.log_info('哈希分析文件处理', 'hash', filename=filename, current=current, total=total)
+        self.analysis_file_processed_signal.emit(filename, current, total)
 
     def cancel_analysis(self):
-        """取消分析：仅发出信号，由 Presenter 连接到 hash_service.cancel。
-
-        不直接调用 service.cancel，保证取消操作通过信号链传递。
-        """
         self.is_canceled = True
-        self.cancel_requested.emit()
+        self.hash_service.cancel()
 
     def closeEvent(self, event):
         if not self.is_canceled:
