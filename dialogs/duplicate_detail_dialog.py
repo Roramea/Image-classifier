@@ -10,6 +10,7 @@ from PyQt5.QtGui import QPixmap, QFont
 from PyQt5.QtCore import Qt, QSize
 
 from core.debug_manager import debug_manager
+from core.utils import format_size
 
 
 class DuplicateDetailDialog(QDialog):
@@ -169,7 +170,7 @@ class DuplicateDetailDialog(QDialog):
     def get_file_info(self, path: str) -> str:
         try:
             size = os.path.getsize(path)
-            size_str = self.format_size(size)
+            size_str = format_size(size)
             
             mtime = os.path.getmtime(path)
             mtime_str = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
@@ -184,14 +185,6 @@ class DuplicateDetailDialog(QDialog):
                    f"<b>路径:</b> {path}"
         except Exception:
             return f"<b>文件名:</b> {os.path.basename(path)}<br><b>路径:</b> {path}"
-
-    def format_size(self, size: int) -> str:
-        if size < 1024:
-            return f"{size} B"
-        elif size < 1024 * 1024:
-            return f"{size / 1024:.2f} KB"
-        else:
-            return f"{size / (1024 * 1024):.2f} MB"
 
     def toggle_path(self, path: str, state: int):
         if state == Qt.Checked:

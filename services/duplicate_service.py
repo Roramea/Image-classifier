@@ -134,20 +134,3 @@ class DuplicateService:
     def clear_all_duplicate_memory(self):
         """清空 classifier 中已处理重复组的记忆。"""
         self.classifier.clear_duplicate_memory()
-
-    def add_processed_image(self, path: str):
-        self.processed_images.add(path)
-
-    def remove_processed_image(self, path: str):
-        self.processed_images.discard(path)
-
-    def load_cached_duplicates(self):
-        """从 classifier 哈希缓存加载重复图片。"""
-        debug_manager.log_info('加载缓存的重复图片', 'duplicate')
-        cache = self.classifier.load_hash_cache()
-        if cache and 'duplicates' in cache:
-            self.set_duplicates(cache['duplicates'])
-            debug_manager.log_info('缓存重复图片加载成功', 'duplicate', group_count=len(self.duplicates))
-        else:
-            debug_manager.log_info('缓存中无重复图片数据', 'duplicate')
-            self.duplicates = {}

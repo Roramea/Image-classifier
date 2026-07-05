@@ -1,7 +1,6 @@
 import os
 import hashlib
 from PIL import Image
-import math
 
 
 def compute_md5(file_path: str) -> str:

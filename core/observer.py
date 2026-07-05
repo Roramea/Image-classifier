@@ -11,14 +11,6 @@ class Observer:
         if callback not in self._callbacks[event_name]:
             self._callbacks[event_name].append(callback)
 
-    def off(self, event_name: str, callback: Callable = None):
-        if event_name not in self._callbacks:
-            return
-        if callback is None:
-            self._callbacks[event_name] = []
-        else:
-            self._callbacks[event_name].remove(callback)
-
     def emit(self, event_name: str, *args, **kwargs):
         if event_name not in self._callbacks:
             return

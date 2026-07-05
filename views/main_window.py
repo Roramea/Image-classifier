@@ -9,7 +9,7 @@ from PyQt5.QtWidgets import (
     QDialog
 )
 from PyQt5.QtGui import QPixmap, QFont, QTransform, QKeySequence, QColor, QKeyEvent
-from PyQt5.QtCore import Qt, QSize, QTimer
+from PyQt5.QtCore import Qt, QSize, QTimer, QEvent
 
 from dialogs.duplicate_detail_dialog import DuplicateDetailDialog
 from dialogs.storage_clean_dialog import StorageCleanDialog
@@ -496,17 +496,17 @@ class MainWindow(QMainWindow):
         self.image_label.setMinimumHeight(300)
         layout.addWidget(self.image_label, 1)
 
-        info_layout = QHBoxLayout()
-        info_layout.setSpacing(16)
-        info_layout.setContentsMargins(4, 0, 4, 0)
+        self.info_layout = QHBoxLayout()
+        self.info_layout.setSpacing(16)
+        self.info_layout.setContentsMargins(4, 0, 4, 0)
 
         self.group_info_label = QLabel("组: /")
         self.group_info_label.setStyleSheet("color: #3498db; font-weight: bold; font-size: 13px;")
-        info_layout.addWidget(self.group_info_label)
+        self.info_layout.addWidget(self.group_info_label)
 
         self.image_info_label = QLabel("图片: /")
         self.image_info_label.setStyleSheet("color: #9b59b6; font-weight: bold; font-size: 13px;")
-        info_layout.addWidget(self.image_info_label)
+        self.info_layout.addWidget(self.image_info_label)
 
         self.path_label = QLineEdit()
         self.path_label.setStyleSheet("""
@@ -531,9 +531,43 @@ class MainWindow(QMainWindow):
         self.path_label.setCursorPosition(0)
         self.path_label.returnPressed.connect(self.on_filename_edited)
         self.path_label.editingFinished.connect(self.on_filename_editing_finished)
-        info_layout.addWidget(self.path_label, 1)
+        self.path_label.textChanged.connect(self.on_path_label_text_changed)
+        self.path_label.installEventFilter(self)
 
-        layout.addLayout(info_layout)
+        self.cancel_rename_btn = QToolButton()
+        self.cancel_rename_btn.setText("✕")
+        self.cancel_rename_btn.setStyleSheet("""
+            QToolButton {
+                background-color: #e74c3c;
+                color: white;
+                font-size: 12px;
+                border: none;
+                border-radius: 3px;
+                padding: 2px 8px;
+                min-width: 24px;
+                min-height: 20px;
+            }
+            QToolButton:hover {
+                background-color: #ff6b6b;
+            }
+            QToolButton:pressed {
+                background-color: #c0392b;
+            }
+        """)
+        self.cancel_rename_btn.clicked.connect(self.on_cancel_rename)
+        self.cancel_rename_btn.hide()
+        self.cancel_rename_btn.setAutoRaise(False)
+
+        self.path_container = QWidget()
+        self.path_container_layout = QHBoxLayout(self.path_container)
+        self.path_container_layout.setSpacing(4)
+        self.path_container_layout.setContentsMargins(0, 0, 0, 0)
+        self.path_container_layout.addWidget(self.path_label, 1)
+        self.path_container_layout.addWidget(self.cancel_rename_btn)
+        
+        self.info_layout.addWidget(self.path_container, 1)
+
+        layout.addLayout(self.info_layout)
 
         nav_layout = self._create_navigation_layout()
         layout.addLayout(nav_layout)
@@ -743,6 +777,21 @@ class MainWindow(QMainWindow):
         self.shortcut_rotate_180_cw.setContext(Qt.ApplicationShortcut)
         self.shortcut_rotate_180_cw.activated.connect(lambda: self.rotate_image(True, 180))
 
+        self.shortcut_escape = QShortcut(QKeySequence(Qt.Key_Escape), self)
+        self.shortcut_escape.setContext(Qt.ApplicationShortcut)
+        self.shortcut_escape.activated.connect(self.on_escape_pressed)
+
+    def eventFilter(self, obj, event):
+        """事件过滤器：处理 path_label 的鼠标点击事件。"""
+        if obj == self.path_label:
+            if event.type() == QEvent.MouseButtonPress:
+                debug_manager.log_info('path_label鼠标点击', 'rename', is_read_only=self.path_label.isReadOnly())
+                if self.path_label.isReadOnly():
+                    self.path_label.setReadOnly(False)
+                    self.path_label.setFocus()
+                    return True
+        return super().eventFilter(obj, event)
+
     def keyPressEvent(self, event: QKeyEvent):
         """捕获按键，匹配快捷键映射触发分类。
 
@@ -796,6 +845,8 @@ class MainWindow(QMainWindow):
         if not self.path_label.hasFocus():
             self.path_label.setText(filename)
             self.path_label.setCursorPosition(0)
+            self.cancel_rename_btn.show()
+            debug_manager.log_info('测试：强制显示取消按钮', 'rename', is_visible=self.cancel_rename_btn.isVisible())
 
         try:
             # 从 LRU 缓存读取原图，避免重复磁盘解码
@@ -849,7 +900,7 @@ class MainWindow(QMainWindow):
                 self.path_label.setText(os.path.basename(current_path))
 
     def on_filename_editing_finished(self):
-        """文件名输入框失去焦点时：若内容未变则什么都不做。
+        """文件名输入框失去焦点时：若内容有变化则恢复原始文件名。
 
         实际重命名仅在 Enter 时触发（on_filename_edited），
         避免点击其他地方时意外触发重命名。
@@ -859,9 +910,58 @@ class MainWindow(QMainWindow):
             return
         current_filename = os.path.basename(current_path)
         if self.path_label.text() != current_filename:
-            # 内容有变化但用户没按 Enter，提示一下但不自动执行
-            # 将光标移到开头便于查看完整文件名
+            self.path_label.setText(current_filename)
             self.path_label.setCursorPosition(0)
+
+    def on_path_label_text_changed(self, text):
+        """文件名输入框内容变化时：显示/隐藏取消按钮。"""
+        debug_manager.log_info('on_path_label_text_changed触发', 'rename', text=text)
+        
+        current_path = self.presenter.get_current_image_path()
+        debug_manager.log_info('当前图片路径', 'rename', current_path=current_path)
+        
+        if not current_path:
+            debug_manager.log_info('当前路径为空，返回', 'rename')
+            return
+        
+        original_filename = os.path.basename(current_path)
+        debug_manager.log_info('原始文件名', 'rename', original_filename=original_filename)
+        
+        if text != original_filename:
+            debug_manager.log_info('文件名有变化，显示取消按钮', 'rename')
+            self.cancel_rename_btn.show()
+            debug_manager.log_info('按钮显示状态', 'rename', is_visible=self.cancel_rename_btn.isVisible(), btn_geometry=self.cancel_rename_btn.geometry())
+        else:
+            debug_manager.log_info('文件名无变化，隐藏取消按钮', 'rename')
+            self.cancel_rename_btn.hide()
+
+    def on_escape_pressed(self):
+        """ESC 键按下时：若 path_label 有焦点则取消重命名。"""
+        debug_manager.log_info('ESC键按下', 'rename', path_label_has_focus=self.path_label.hasFocus())
+        
+        if self.path_label.hasFocus():
+            debug_manager.log_info('path_label有焦点，触发取消重命名', 'rename')
+            self.on_cancel_rename()
+
+    def on_cancel_rename(self):
+        """取消重命名，恢复原始文件名并设置为只读模式。"""
+        debug_manager.log_info('取消重命名', 'rename')
+        
+        current_path = self.presenter.get_current_image_path()
+        debug_manager.log_info('当前图片路径', 'rename', current_path=current_path)
+        
+        if current_path:
+            original_filename = os.path.basename(current_path)
+            debug_manager.log_info('恢复原始文件名', 'rename', original_filename=original_filename)
+            self.path_label.setText(original_filename)
+        else:
+            debug_manager.log_info('当前路径为空，无法恢复文件名', 'rename')
+        
+        self.path_label.setReadOnly(True)
+        self.path_label.clearFocus()
+        self.set_status("")
+        
+        debug_manager.log_info('取消重命名完成', 'rename')
 
     def update_shortcuts(self, shortcuts: dict):
         self.shortcut_list.clear()

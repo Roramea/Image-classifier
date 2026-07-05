@@ -59,9 +59,6 @@ class DebugManager:
     def log_info(self, message: str, category: str = 'general', **kwargs):
         self.log('INFO', message, category, **kwargs)
     
-    def log_debug(self, message: str, category: str = 'general', **kwargs):
-        self.log('DEBUG', message, category, **kwargs)
-    
     def log_exception(self, ex: Exception, category: str = 'exception', **kwargs):
         trace = traceback.format_exc()
         self.log_error(
@@ -173,12 +170,6 @@ class DebugManager:
         self.server.debug_manager = self
         self.server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.server_thread.start()
-    
-    def stop_http_server(self):
-        if self.server:
-            self.server.shutdown()
-            self.server = None
-            self.server_thread = None
 
 
 debug_manager = DebugManager()

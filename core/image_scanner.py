@@ -4,7 +4,7 @@ from PIL import Image
 from collections import defaultdict
 from typing import List, Dict, Optional
 
-from .simple_hash import compute_image_hash, hamming_distance, dhash
+from .simple_hash import hamming_distance, dhash
 from .debug_manager import debug_manager
 
 

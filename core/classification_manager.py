@@ -1,10 +1,10 @@
 import os
 import json
 import hashlib
-from datetime import datetime
 from typing import Dict, Optional
 
 from core.debug_manager import debug_manager
+from core.utils import format_size
 
 
 class ClassificationManager:
@@ -337,8 +337,7 @@ class ClassificationManager:
                 debug_manager.log_warning('获取文件信息失败', 'hash', path=path, error=str(e))
 
         cache = {
-            'files': files,
-            'timestamp': datetime.now().isoformat()
+            'files': files
         }
         return cache
 
@@ -467,15 +466,7 @@ class ClassificationManager:
     
     def format_storage_size(self) -> str:
         size = self.get_storage_size()
-        return self._format_size(size)
-    
-    def _format_size(self, size: int) -> str:
-        if size < 1024:
-            return f"{size} B"
-        elif size < 1024 * 1024:
-            return f"{size / 1024:.2f} KB"
-        else:
-            return f"{size / (1024 * 1024):.2f} MB"
+        return format_size(size)
     
     def get_storage_details(self) -> dict:
         details = {
@@ -592,25 +583,6 @@ class ClassificationManager:
             self.unfinished_session = None
         
         return success
-    
-    def clear_all_storage(self):
-        if os.path.exists(self.CONFIG_DIR):
-            for filename in os.listdir(self.CONFIG_DIR):
-                if filename in self.PROTECTED_FILES:
-                    continue
-                
-                filepath = os.path.join(self.CONFIG_DIR, filename)
-                if os.path.isfile(filepath):
-                    try:
-                        os.remove(filepath)
-                    except Exception:
-                        pass
-        
-        self.shortcut_map = {}
-        self.recent_folders = []
-        self.unfinished_session = None
-        self.processed_duplicates = {}
-        self.last_folder = ""
     
     def get_unfinished_session(self) -> Optional[dict]:
         if self.unfinished_session:

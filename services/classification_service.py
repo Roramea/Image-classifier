@@ -47,39 +47,6 @@ class ClassificationService:
             self.current_image_index = 0
         return current_group[self.current_image_index]
 
-    def classify_current_group(self, shortcut: str) -> tuple:
-        """分类当前组的所有图片到快捷键对应文件夹。
-
-        Returns:
-            (success_count, failed_paths) 元组
-        """
-        debug_manager.log_info('开始分类当前组', 'classification', shortcut=shortcut, group_index=self.current_group_index)
-        if not self.groups:
-            debug_manager.log_warning('没有分组可分类', 'classification')
-            return 0, []
-
-        if self.current_group_index < 0 or self.current_group_index >= len(self.groups):
-            self.current_group_index = 0
-
-        current_group = self.groups[self.current_group_index]
-        folder_name = os.path.basename(self.classifier.get_folder(shortcut))
-        debug_manager.log_info('分类组信息', 'classification', group_size=len(current_group), folder_name=folder_name)
-
-        success_count = 0
-        failed_paths = []
-
-        for path in current_group:
-            dest_path = self.classifier.classify_image(path, shortcut)
-            if dest_path:
-                success_count += 1
-                self.processed_images.add(path)
-            else:
-                failed_paths.append(path)
-
-        self.refresh_groups()
-
-        return success_count, failed_paths
-
     def remove_path(self, path: str) -> bool:
         """从分组中增量移除指定路径，避免全量 os.path.exists 扫描。
 
@@ -212,22 +179,6 @@ class ClassificationService:
         self.current_group_index = (self.current_group_index + 1) % len(self.groups)
         self.current_image_index = 0
 
-    def get_group_count(self) -> int:
-        return len(self.groups)
-
-    def get_image_count_in_current_group(self) -> int:
-        current_group = self.get_current_group()
-        return len(current_group)
-
-    def get_current_group_index(self) -> int:
-        return self.current_group_index
-
-    def get_current_image_index(self) -> int:
-        return self.current_image_index
-
-    def is_classification_complete(self) -> bool:
-        return len(self.groups) == 0
-
     def mark_processed(self, path: str):
         """标记图片为已处理并从分组中移除该路径（增量操作，性能更好）。"""
         self.processed_images.add(path)
@@ -254,10 +205,3 @@ class ClassificationService:
         if found:
             debug_manager.log_info('路径重命名', 'classification', old=old_path, new=new_path)
         return found
-
-    def reset(self):
-        """重置所有状态。"""
-        self.groups = []
-        self.current_group_index = 0
-        self.current_image_index = 0
-        self.processed_images = set()
