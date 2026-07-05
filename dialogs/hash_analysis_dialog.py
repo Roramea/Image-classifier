@@ -1,14 +1,22 @@
 import time
 
 from PyQt5.QtWidgets import QDialog, QLabel, QProgressBar, QVBoxLayout, QWidget, QHBoxLayout, QSlider
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QEvent
 from PyQt5.QtGui import QFont
 
-from services.hash_analysis_service import HashAnalysisService
 from core.debug_manager import debug_manager
 
 
 class HashAnalysisDialog(QDialog):
+    """哈希分析进度对话框。
+
+    职责：展示分析进度、阶段、剩余时间；让用户调整阈值；接收取消请求。
+    通过 Observer 模式订阅 hash_service 的事件更新进度（这是正确的解耦方向）；
+    通过信号向 Presenter 上报用户操作（阈值调整、取消请求），不直接调用 service 的状态修改方法。
+
+    注：start_analysis 仍由 showEvent 直接触发，因对话框管理自身显示生命周期，可接受。
+    """
+
     progress_updated_signal = pyqtSignal(int, int, str, str, int, int)
     analysis_finished_signal = pyqtSignal(list, dict, list)
     analysis_canceled_signal = pyqtSignal()
@@ -16,30 +24,54 @@ class HashAnalysisDialog(QDialog):
     analysis_stage_changed_signal = pyqtSignal(str, int, int)
     analysis_file_processed_signal = pyqtSignal(str, int, int)
     threshold_changed = pyqtSignal(int)
+    # 用户请求取消时发出，由 Presenter 连接到 hash_service.cancel
+    cancel_requested = pyqtSignal()
+    # 窗口最小化/恢复时发出，参数为是否最小化
+    minimization_changed = pyqtSignal(bool)
 
-    def __init__(self, image_paths: list, threshold: int = 10, parent=None):
+    def __init__(self, hash_service, total_count: int, initial_threshold: int, parent=None):
+        """初始化对话框。
+
+        Args:
+            hash_service: 哈希分析服务实例（仅用于订阅事件和启动分析，不直接修改其状态）
+            total_count: 图片总数（替代直接读取 hash_service.image_paths）
+            initial_threshold: 初始相似度阈值（替代直接读取 hash_service.threshold）
+            parent: 父组件
+        """
         super().__init__(parent)
         self.setWindowTitle("图片相似度分析")
-        self.setFixedSize(550, 360)
+        self.setFixedSize(550, 400)
         self.setModal(False)
-        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+        # 保留最小化按钮，移除帮助按钮和最大化按钮
+        self.setWindowFlags(
+            self.windowFlags()
+            & ~Qt.WindowContextHelpButtonHint
+            & ~Qt.WindowMaximizeButtonHint
+            | Qt.WindowMinimizeButtonHint
+        )
         self.setWindowModality(Qt.NonModal)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #2d2d2d;
+            }
+            QLabel {
+                color: #ecf0f1;
+            }
+        """)
 
-        self.image_paths = image_paths
-        self.total_count = len(image_paths)
+        self.hash_service = hash_service
+        self.total_count = total_count
         self.start_time = None
         self.is_canceled = False
-        self.current_stage = 0
-        self.threshold = threshold
-
-        self.hash_service = HashAnalysisService(threshold)
+        # 标记分析是否正在进行中，防止 showEvent 重复触发
+        self._is_analyzing = False
+        # 本地跟踪阶段，替代直接读取 hash_service.current_stage
+        self._current_stage = 0
+        self.threshold = initial_threshold
 
         self.init_ui()
         self.connect_signals()
     
-    def set_cached_hashes(self, cached_hashes: dict):
-        self.hash_service.set_cached_hashes(cached_hashes)
-
     def init_ui(self):
         layout = QVBoxLayout()
         layout.setContentsMargins(20, 20, 20, 20)
@@ -55,7 +87,7 @@ class HashAnalysisDialog(QDialog):
 
         threshold_label = QLabel("相似度阈值:")
         threshold_label.setFont(QFont("Microsoft YaHei", 10))
-        threshold_label.setStyleSheet("color: #666666;")
+        threshold_label.setStyleSheet("color: #95a5a6;")
         threshold_layout.addWidget(threshold_label)
 
         self.threshold_slider = QSlider(Qt.Horizontal)
@@ -65,11 +97,34 @@ class HashAnalysisDialog(QDialog):
         self.threshold_slider.setTickPosition(QSlider.TicksBelow)
         self.threshold_slider.setTickInterval(1)
         self.threshold_slider.valueChanged.connect(self.on_threshold_changed)
+        self.threshold_slider.setStyleSheet("""
+            QSlider::groove:horizontal {
+                height: 6px;
+                background: #1e1e1e;
+                border-radius: 3px;
+            }
+            QSlider::handle:horizontal {
+                background: #3498db;
+                border: 2px solid #2980b9;
+                width: 16px;
+                margin: -5px 0;
+                border-radius: 8px;
+            }
+            QSlider::sub-page:horizontal {
+                background: #3498db;
+                border-radius: 3px;
+            }
+            QSlider::tick:horizontal {
+                background: #7f8c8d;
+                width: 1px;
+                height: 6px;
+            }
+        """)
         threshold_layout.addWidget(self.threshold_slider)
 
         self.threshold_value_label = QLabel(f"{self.threshold}")
         self.threshold_value_label.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
-        self.threshold_value_label.setStyleSheet("color: #4a90d9; min-width: 30px;")
+        self.threshold_value_label.setStyleSheet("color: #3498db; min-width: 30px;")
         self.threshold_value_label.setAlignment(Qt.AlignCenter)
         threshold_layout.addWidget(self.threshold_value_label)
 
@@ -77,7 +132,7 @@ class HashAnalysisDialog(QDialog):
 
         threshold_hint = QLabel("阈值越小，相似度要求越高（2-25，默认10）")
         threshold_hint.setFont(QFont("Microsoft YaHei", 9))
-        threshold_hint.setStyleSheet("color: #999999;")
+        threshold_hint.setStyleSheet("color: #7f8c8d;")
         threshold_hint.setAlignment(Qt.AlignCenter)
         layout.addWidget(threshold_hint)
 
@@ -87,14 +142,15 @@ class HashAnalysisDialog(QDialog):
         self.progress_bar.setTextVisible(True)
         self.progress_bar.setStyleSheet("""
             QProgressBar {
-                border: 2px solid #cccccc;
+                border: 1px solid #34495e;
                 border-radius: 5px;
                 text-align: center;
                 font-size: 12px;
-                color: #333333;
+                color: #ecf0f1;
+                background-color: #1e1e1e;
             }
             QProgressBar::chunk {
-                background-color: #4a90d9;
+                background-color: #3498db;
                 border-radius: 3px;
             }
         """)
@@ -110,19 +166,19 @@ class HashAnalysisDialog(QDialog):
 
         stage_label_text = QLabel("阶段:")
         stage_label_text.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
-        stage_label_text.setStyleSheet("color: #666666;")
+        stage_label_text.setStyleSheet("color: #95a5a6;")
         stage_layout.addWidget(stage_label_text)
 
         self.stage_label = QLabel("准备中...")
         self.stage_label.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
-        self.stage_label.setStyleSheet("color: #4a90d9;")
+        self.stage_label.setStyleSheet("color: #3498db;")
         stage_layout.addWidget(self.stage_label)
 
         stage_layout.addStretch()
 
         self.time_label = QLabel("预计剩余: --")
         self.time_label.setFont(QFont("Microsoft YaHei", 10))
-        self.time_label.setStyleSheet("color: #666666;")
+        self.time_label.setStyleSheet("color: #95a5a6;")
         stage_layout.addWidget(self.time_label)
 
         layout.addLayout(stage_layout)
@@ -133,12 +189,13 @@ class HashAnalysisDialog(QDialog):
         self.current_stage_progress.setTextVisible(False)
         self.current_stage_progress.setStyleSheet("""
             QProgressBar {
-                border: 1px solid #e0e0e0;
+                border: 1px solid #34495e;
                 border-radius: 3px;
                 height: 6px;
+                background-color: #1e1e1e;
             }
             QProgressBar::chunk {
-                background-color: #7db3e8;
+                background-color: #3498db;
                 border-radius: 2px;
             }
         """)
@@ -151,7 +208,7 @@ class HashAnalysisDialog(QDialog):
         self.file_label = QLabel("")
         self.file_label.setWordWrap(True)
         self.file_label.setAlignment(Qt.AlignLeft)
-        self.file_label.setStyleSheet("color: #333333; font-size: 12px; background-color: #f5f5f5; padding: 8px; border-radius: 4px; min-height: 40px;")
+        self.file_label.setStyleSheet("color: #ecf0f1; font-size: 12px; background-color: #1e1e1e; padding: 8px; border: 1px solid #34495e; border-radius: 4px; min-height: 40px;")
         layout.addWidget(self.file_label)
 
         speed_layout = QHBoxLayout()
@@ -159,12 +216,12 @@ class HashAnalysisDialog(QDialog):
 
         self.speed_label = QLabel("处理速度: --")
         self.speed_label.setFont(QFont("Microsoft YaHei", 10))
-        self.speed_label.setStyleSheet("color: #666666;")
+        self.speed_label.setStyleSheet("color: #95a5a6;")
         speed_layout.addWidget(self.speed_label)
 
         self.elapsed_label = QLabel("已用时: --")
         self.elapsed_label.setFont(QFont("Microsoft YaHei", 10))
-        self.elapsed_label.setStyleSheet("color: #666666;")
+        self.elapsed_label.setStyleSheet("color: #95a5a6;")
         speed_layout.addWidget(self.elapsed_label)
 
         layout.addLayout(speed_layout)
@@ -172,12 +229,46 @@ class HashAnalysisDialog(QDialog):
         self.setLayout(layout)
 
     def connect_signals(self):
-        self.hash_service.progress_updated.connect(self.on_update_progress)
-        self.hash_service.analysis_finished.connect(self.on_analysis_finished)
-        self.hash_service.analysis_canceled.connect(self.on_analysis_canceled)
-        self.hash_service.analysis_error.connect(self.on_analysis_error)
-        self.hash_service.analysis_stage_changed.connect(self.on_stage_changed)
-        self.hash_service.analysis_file_processed.connect(self.on_file_processed)
+        """订阅 service 事件并连接 Qt 信号。
+
+        Observer 回调在 service 的后台线程中执行，不能直接操作 UI。
+        因此 Observer 回调只 emit Qt 信号，Qt 信号跨线程时自动使用队列连接，
+        槽函数在主线程执行，避免线程违规。
+        """
+        # Observer 回调（后台线程）-> emit Qt 信号
+        self.hash_service.on('progress_updated', self._relay_progress_updated)
+        self.hash_service.on('analysis_finished', self._relay_analysis_finished)
+        self.hash_service.on('analysis_canceled', self._relay_analysis_canceled)
+        self.hash_service.on('analysis_error', self._relay_analysis_error)
+        self.hash_service.on('analysis_stage_changed', self._relay_stage_changed)
+        self.hash_service.on('analysis_file_processed', self._relay_file_processed)
+
+        # Qt 信号 -> UI 更新方法（主线程执行，自动跨线程队列）
+        self.progress_updated_signal.connect(self.on_update_progress)
+        self.analysis_finished_signal.connect(self.on_analysis_finished)
+        self.analysis_canceled_signal.connect(self.on_analysis_canceled)
+        self.analysis_error_signal.connect(self.on_analysis_error)
+        self.analysis_stage_changed_signal.connect(self.on_stage_changed)
+
+    # --- Observer 回调中转方法（后台线程执行，仅 emit 信号）---
+
+    def _relay_progress_updated(self, current, total, stage_name, filename, processed_count, stage_progress=0):
+        self.progress_updated_signal.emit(current, total, stage_name, filename, processed_count, stage_progress)
+
+    def _relay_analysis_finished(self, groups, duplicates, hash_list=None):
+        self.analysis_finished_signal.emit(groups, duplicates, hash_list if hash_list else [])
+
+    def _relay_analysis_canceled(self):
+        self.analysis_canceled_signal.emit()
+
+    def _relay_analysis_error(self, error):
+        self.analysis_error_signal.emit(error)
+
+    def _relay_stage_changed(self, stage, current, total):
+        self.analysis_stage_changed_signal.emit(stage, current, total)
+
+    def _relay_file_processed(self, filename, current, total):
+        self.analysis_file_processed_signal.emit(filename, current, total)
 
     def showEvent(self, event):
         debug_manager.log_info('哈希对话框显示', 'hash')
@@ -185,23 +276,46 @@ class HashAnalysisDialog(QDialog):
         self.start_analysis()
 
     def start_analysis(self):
+        if self._is_analyzing:
+            debug_manager.log_info('哈希分析已在进行中，跳过重复启动', 'hash')
+            return
         debug_manager.log_info('开始哈希分析', 'hash', image_count=self.total_count, threshold=self.threshold)
+        self._is_analyzing = True
         self.start_time = time.time()
         self.is_canceled = False
-        self.current_stage = 0
+        self._current_stage = 0
 
-        self.hash_service.start_analysis(self.image_paths)
+        self.hash_service.start_analysis(self.hash_service.image_paths)
 
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_time_display)
         self.timer.start(500)
     
     def on_threshold_changed(self, value: int):
+        """用户调整阈值：仅更新本地显示并上报信号，不直接修改 service 状态。
+
+        service 的阈值更新由 Presenter 的 on_hash_threshold_changed 回调统一处理，
+        保证数据流向单一（View -> Presenter -> Service）。
+        """
         self.threshold = value
         self.threshold_value_label.setText(str(value))
-        self.hash_service.set_threshold(value)
         self.threshold_changed.emit(value)
         debug_manager.log_info('用户调整相似度阈值', 'hash', threshold=value)
+
+    def sync_threshold(self, threshold: int):
+        """从主界面同步阈值到弹窗滑块。
+
+        阻塞 valueChanged 信号避免反向触发 threshold_changed，
+        防止主界面与弹窗之间形成循环同步。
+        """
+        if threshold == self.threshold:
+            return
+        self.threshold = threshold
+        self.threshold_slider.blockSignals(True)
+        self.threshold_slider.setValue(threshold)
+        self.threshold_slider.blockSignals(False)
+        self.threshold_value_label.setText(str(threshold))
+        debug_manager.log_info('从主界面同步阈值到弹窗', 'hash', threshold=threshold)
 
     def on_update_progress(self, current: int, total: int, stage_name: str, filename: str, processed_count: int, stage_progress: int = 0):
         self.progress_bar.setMaximum(total)
@@ -210,7 +324,8 @@ class HashAnalysisDialog(QDialog):
         percentage = int((current / total) * 100) if total > 0 else 0
         self.progress_text.setText(f"{current} / {total} ({percentage}%)")
 
-        self.stage_label.setText(f"{self.hash_service.current_stage}/3: {stage_name}")
+        # 使用本地跟踪的 stage，替代直接读取 hash_service.current_stage
+        self.stage_label.setText(f"{self._current_stage}/3: {stage_name}")
         self.current_stage_progress.setValue(stage_progress)
 
         if filename:
@@ -272,36 +387,61 @@ class HashAnalysisDialog(QDialog):
             self.elapsed_label.setText(self._format_elapsed_time(elapsed))
 
     def on_analysis_finished(self, groups: list, duplicates: dict, hash_list: list = None):
+        """分析完成回调（主线程执行）：停止计时器并关闭对话框。
+
+        信号由 _relay_analysis_finished 在后台线程 emit，Qt 队列到主线程执行此方法。
+        Presenter 的 on_hash_finished 也通过 analysis_finished_signal 连接，同样在主线程执行。
+        """
         debug_manager.log_info('哈希分析完成', 'hash', group_count=len(groups), duplicate_groups=len(duplicates))
         self.timer.stop()
-        self.analysis_finished_signal.emit(groups, duplicates, hash_list)
+        # 标记已结束，防止 closeEvent 再次触发取消请求
+        self.is_canceled = True
+        self._is_analyzing = False
         self.accept()
 
     def on_analysis_canceled(self):
+        """分析取消回调（主线程执行）：停止计时器并关闭对话框。"""
         self.is_canceled = True
+        self._is_analyzing = False
         self.timer.stop()
-        self.analysis_canceled_signal.emit()
         self.accept()
 
     def on_analysis_error(self, error: str):
+        """分析出错回调（主线程执行）：停止计时器并关闭对话框。"""
         self.timer.stop()
         debug_manager.log_error('哈希分析出错', 'hash', error=error)
-        self.analysis_error_signal.emit(error)
+        # 标记已结束，防止 closeEvent 再次触发取消请求
+        self.is_canceled = True
+        self._is_analyzing = False
         self.accept()
 
     def on_stage_changed(self, stage: str, current: int, total: int):
+        """阶段变更回调（主线程执行）：本地递增 _current_stage 用于显示。"""
+        self._current_stage += 1
         debug_manager.log_info('哈希分析阶段变更', 'hash', stage=stage, current=current, total=total)
-        self.analysis_stage_changed_signal.emit(stage, current, total)
-
-    def on_file_processed(self, filename: str, current: int, total: int):
-        debug_manager.log_info('哈希分析文件处理', 'hash', filename=filename, current=current, total=total)
-        self.analysis_file_processed_signal.emit(filename, current, total)
 
     def cancel_analysis(self):
+        """取消分析：仅发出信号，由 Presenter 连接到 hash_service.cancel。
+
+        不直接调用 service.cancel，保证取消操作通过信号链传递。
+        """
         self.is_canceled = True
-        self.hash_service.cancel()
+        self.cancel_requested.emit()
 
     def closeEvent(self, event):
         if not self.is_canceled:
             self.cancel_analysis()
         event.accept()
+
+    def changeEvent(self, event):
+        """拦截最小化/恢复事件，发出信号通知主界面更新 UI。
+
+        最小化时不取消分析，后台继续运行；主界面显示恢复按钮供用户重新展开。
+        """
+        if event.type() == QEvent.WindowStateChange:
+            was_minimized = bool(event.oldState() & Qt.WindowMinimized)
+            is_minimized = bool(self.windowState() & Qt.WindowMinimized)
+            if was_minimized != is_minimized:
+                self.minimization_changed.emit(is_minimized)
+                debug_manager.log_info('哈希弹窗最小化状态变化', 'hash', minimized=is_minimized)
+        super().changeEvent(event)

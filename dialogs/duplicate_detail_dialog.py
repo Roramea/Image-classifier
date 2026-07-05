@@ -13,19 +13,31 @@ from core.debug_manager import debug_manager
 
 
 class DuplicateDetailDialog(QDialog):
+    """重复图片详情对话框。
+
+    职责：展示重复图片组、让用户选择要删除的图片、返回用户的选择。
+    不执行实际文件删除（由 Presenter 委托 DuplicateService 处理），
+    不访问父组件的核心服务（避免反向耦合）。
+
+    通过 get_deletion_result() 获取用户确认删除的列表。
+    """
+
     def __init__(self, paths_list: list, parent=None, md5_hashes=None):
         super().__init__(parent)
         self.setWindowTitle("重复图片详情")
         self.setGeometry(100, 100, 1000, 800)
-        
+
         self.groups = []
-        
+        # 用户确认删除的列表：[(md5_hash, [selected_paths]), ...]
+        # 仅在对话框 accept 后填充，由 Presenter 读取并委托 service 执行
+        self._pending_deletions: list = []
+
         if not paths_list:
             debug_manager.log_warning('路径列表为空', 'duplicate')
             QMessageBox.warning(self, "警告", "没有足够的重复图片")
             self.reject()
             return
-        
+
         if isinstance(paths_list[0], list):
             for i, paths in enumerate(paths_list):
                 valid_paths = [p for p in paths if p and os.path.exists(p)]
@@ -36,18 +48,18 @@ class DuplicateDetailDialog(QDialog):
             valid_paths = [p for p in paths_list if p and os.path.exists(p)]
             if len(valid_paths) > 1:
                 self.groups = [(md5_hashes, valid_paths)]
-        
+
         debug_manager.log_info('打开重复图片详情对话框', 'duplicate', group_count=len(self.groups))
-        
+
         if not self.groups:
             debug_manager.log_warning('没有有效重复图片组', 'duplicate')
             QMessageBox.warning(self, "警告", "没有足够的重复图片")
             self.reject()
             return
-        
+
         self.selected_paths = set()
         self.checkbox_map = {}
-        
+
         self.init_ui()
 
     def init_ui(self):
@@ -211,7 +223,13 @@ class DuplicateDetailDialog(QDialog):
             checkbox.setChecked(path in self.selected_paths)
 
     def delete_selected(self):
-        debug_manager.log_info('删除选中的重复图片', 'duplicate', selected_count=len(self.selected_paths))
+        """收集用户选中的删除项，确认后关闭对话框。
+
+        仅整理选中路径到 _pending_deletions，不执行实际文件删除。
+        实际删除由 Presenter 通过 DuplicateService.delete_selected_duplicates 执行，
+        以保证文件删除、记忆保存、状态更新的一致性。
+        """
+        debug_manager.log_info('收集选中的重复图片', 'duplicate', selected_count=len(self.selected_paths))
         if not self.selected_paths:
             debug_manager.log_warning('没有选中任何图片', 'duplicate')
             QMessageBox.warning(self, "警告", "请选择要删除的图片")
@@ -225,33 +243,19 @@ class DuplicateDetailDialog(QDialog):
         )
 
         if reply == QMessageBox.Yes:
-            success_count = 0
-            failed_paths = []
-            deleted_paths = []
-            debug_manager.log_info('用户确认删除', 'duplicate', count=len(self.selected_paths))
-            
-            for path in list(self.selected_paths):
-                try:
-                    os.remove(path)
-                    success_count += 1
-                    deleted_paths.append(path)
-                    debug_manager.log_info('图片删除成功', 'duplicate', path=path)
-                except Exception as e:
-                    failed_paths.append(f"{path}: {e}")
-                    debug_manager.log_exception(e, 'duplicate', path=path)
-            
-            if self.parent() and hasattr(self.parent(), 'classifier'):
-                for md5_hash, paths in self.groups:
-                    group_deleted = [p for p in paths if p in deleted_paths]
-                    if group_deleted:
-                        self.parent().classifier.add_processed_duplicate(md5_hash, group_deleted)
-            
-            if success_count > 0:
-                debug_manager.log_info('重复图片删除完成', 'duplicate', success_count=success_count)
-                QMessageBox.information(self, "成功", f"已删除 {success_count} 张图片")
-            
-            if failed_paths:
-                debug_manager.log_warning('部分图片删除失败', 'duplicate', failed_count=len(failed_paths))
-                QMessageBox.warning(self, "警告", f"以下图片删除失败:\n{chr(10).join(failed_paths)}")
-            
+            # 按 md5 分组整理选中路径，供 Presenter 调用 service 使用
+            for md5_hash, paths in self.groups:
+                group_selected = [p for p in paths if p in self.selected_paths]
+                if group_selected:
+                    self._pending_deletions.append((md5_hash, group_selected))
+            debug_manager.log_info('用户确认删除，关闭对话框', 'duplicate', group_count=len(self._pending_deletions))
             self.accept()
+
+    def get_deletion_result(self) -> list:
+        """返回用户确认删除的列表。
+
+        Returns:
+            [(md5_hash, [selected_paths]), ...]，仅在对框 accept 后有值；
+            未确认或取消时返回空列表。
+        """
+        return self._pending_deletions

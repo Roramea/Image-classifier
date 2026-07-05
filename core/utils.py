@@ -2,14 +2,16 @@ from PyQt5.QtCore import Qt
 
 
 def key_to_string(key: int) -> str:
+    """将 Qt 键码转换为字符串表示。
+
+    小键盘数字键在 Qt 中会映射到 Qt.Key_0 ~ Qt.Key_9（带 KeypadModifier），
+    因此无需单独处理 NumPad 枚举（PyQt5 中不存在 Qt.Key_NumPad0 等枚举）。
+    """
     if key >= Qt.Key_A and key <= Qt.Key_Z:
         return chr(key).lower()
     if key >= Qt.Key_0 and key <= Qt.Key_9:
         return str(key - Qt.Key_0)
-    
-    if key >= Qt.Key_NumPad0 and key <= Qt.Key_NumPad9:
-        return str(key - Qt.Key_NumPad0)
-    
+
     special_keys = {
         Qt.Key_F1: 'f1',
         Qt.Key_F2: 'f2',
@@ -28,18 +30,8 @@ def key_to_string(key: int) -> str:
         Qt.Key_Delete: 'delete',
         Qt.Key_Home: 'home',
         Qt.Key_End: 'end',
-        Qt.Key_NumPad0: '0',
-        Qt.Key_NumPad1: '1',
-        Qt.Key_NumPad2: '2',
-        Qt.Key_NumPad3: '3',
-        Qt.Key_NumPad4: '4',
-        Qt.Key_NumPad5: '5',
-        Qt.Key_NumPad6: '6',
-        Qt.Key_NumPad7: '7',
-        Qt.Key_NumPad8: '8',
-        Qt.Key_NumPad9: '9',
     }
-    
+
     return special_keys.get(key, "")
 
 
