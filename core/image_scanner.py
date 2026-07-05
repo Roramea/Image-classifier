@@ -1,10 +1,9 @@
 import os
 import hashlib
 from PIL import Image
-from collections import defaultdict
-from typing import List, Dict, Optional
+from typing import List, Optional
 
-from .simple_hash import hamming_distance, dhash
+from .simple_hash import dhash
 from .debug_manager import debug_manager
 
 
@@ -13,9 +12,6 @@ class ImageScanner:
     
     def __init__(self):
         self.image_paths: List[str] = []
-        self.md5_hash_map: Dict[str, List[str]] = {}
-        self.image_hash_map: Dict[str, str] = {}
-        self.similar_groups: List[List[str]] = []
     
     def scan_folder(self, folder_path: str) -> int:
         debug_manager.log_info('开始扫描文件夹', 'scanner', folder_path=folder_path)
@@ -53,53 +49,4 @@ class ImageScanner:
             debug_manager.log_warning('计算图像哈希失败', 'scanner', file_path=file_path, error=str(e))
             return None
     
-    def find_duplicates(self) -> Dict[str, List[str]]:
-        debug_manager.log_info('开始查找重复图片', 'scanner', image_count=len(self.image_paths))
-        self.md5_hash_map = defaultdict(list)
-        for path in self.image_paths:
-            md5 = self.compute_md5(path)
-            if md5:
-                self.md5_hash_map[md5].append(path)
-        
-        duplicates = {md5: paths for md5, paths in self.md5_hash_map.items() if len(paths) > 1}
-        debug_manager.log_info('重复图片查找完成', 'scanner', duplicate_groups=len(duplicates))
-        return duplicates
     
-    def group_similar_images(self, threshold: int = 10) -> List[List[str]]:
-        debug_manager.log_info('开始相似图片分组', 'scanner', image_count=len(self.image_paths), threshold=threshold)
-        hash_list = []
-        for path in self.image_paths:
-            img_hash = self.compute_image_hash(path)
-            if img_hash:
-                self.image_hash_map[path] = img_hash
-                hash_list.append((path, img_hash))
-        
-        visited = set()
-        groups = []
-        
-        for i, (path1, hash1) in enumerate(hash_list):
-            if path1 in visited:
-                continue
-            
-            group = [path1]
-            visited.add(path1)
-            
-            for j in range(i + 1, len(hash_list)):
-                path2, hash2 = hash_list[j]
-                if path2 not in visited:
-                    diff = hamming_distance(hash1, hash2)
-                    if diff <= threshold:
-                        group.append(path2)
-                        visited.add(path2)
-            
-            groups.append(group)
-        
-        self.similar_groups = sorted(groups, key=lambda x: len(x), reverse=True)
-        debug_manager.log_info('相似图片分组完成', 'scanner', group_count=len(self.similar_groups))
-        return self.similar_groups
-    
-    def get_all_images(self) -> List[str]:
-        return self.image_paths
-    
-    def get_similar_groups(self) -> List[List[str]]:
-        return self.similar_groups

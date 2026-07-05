@@ -432,9 +432,6 @@ class ClassificationManager:
     def is_duplicate_processed(self, md5_hash: str) -> bool:
         return md5_hash in self.processed_duplicates
     
-    def get_processed_duplicate_paths(self, md5_hash: str) -> list:
-        return self.processed_duplicates.get(md5_hash, [])
-    
     def clear_duplicate_memory(self):
         memory_file = self.get_duplicate_memory_file()
         debug_manager.log_info('清除重复图片记忆', 'config', file=memory_file)
@@ -445,12 +442,6 @@ class ClassificationManager:
                 debug_manager.log_info('重复图片记忆文件已删除', 'config', file=memory_file)
             except Exception as e:
                 debug_manager.log_exception(e, 'config', file=memory_file)
-    
-    def check_all_duplicates_processed(self, all_duplicates: dict) -> bool:
-        for md5_hash in all_duplicates.keys():
-            if md5_hash not in self.processed_duplicates:
-                return False
-        return True
     
     def get_storage_size(self) -> int:
         total_size = 0
@@ -463,10 +454,6 @@ class ClassificationManager:
                 if os.path.isfile(filepath):
                     total_size += os.path.getsize(filepath)
         return total_size
-    
-    def format_storage_size(self) -> str:
-        size = self.get_storage_size()
-        return format_size(size)
     
     def get_storage_details(self) -> dict:
         details = {

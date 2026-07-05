@@ -1,14 +1,4 @@
-import os
-import hashlib
 from PIL import Image
-
-
-def compute_md5(file_path: str) -> str:
-    hash_md5 = hashlib.md5()
-    with open(file_path, 'rb') as f:
-        for chunk in iter(lambda: f.read(8192), b''):
-            hash_md5.update(chunk)
-    return hash_md5.hexdigest()
 
 
 def dhash(image: Image.Image, hash_size: int = 8) -> str:
