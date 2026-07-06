@@ -2,6 +2,7 @@ import os
 from typing import Dict, List
 
 from core.debug_manager import debug_manager
+from core.utils import smart_sort_duplicate_paths
 
 
 class DuplicateService:
@@ -44,8 +45,10 @@ class DuplicateService:
         return [(md5, paths) for md5, paths in self.duplicates.items() if paths and len(paths) > 1]
 
     def delete_duplicate_group(self, md5_hash: str, paths: List[str]) -> tuple:
-        """删除重复组：保留首张，删除其余。
+        """删除重复组：智能保留最"原始"的图片，删除其余副本。
 
+        通过 smart_sort_duplicate_paths 智能排序，将副本命名特征最少的图片排在首位保留，
+        其余带有"（1）""-副本"等命名特征的副本图片优先删除。
         执行文件删除、记录已处理重复组到 classifier 记忆、从 duplicates 字典移除该组。
         此方法是批量删除（保留首张）场景的入口。
 
@@ -56,8 +59,13 @@ class DuplicateService:
         failed_paths = []
         debug_manager.log_info('开始删除重复图片组', 'duplicate', md5_hash=md5_hash, path_count=len(paths))
 
-        total_to_delete = len(paths) - 1
-        for i, path in enumerate(paths[1:]):
+        sorted_paths = smart_sort_duplicate_paths(paths)
+        debug_manager.log_info('智能排序结果', 'duplicate', md5_hash=md5_hash,
+                               kept=os.path.basename(sorted_paths[0]),
+                               deleted=[os.path.basename(p) for p in sorted_paths[1:]])
+
+        total_to_delete = len(sorted_paths) - 1
+        for i, path in enumerate(sorted_paths[1:]):
             try:
                 os.remove(path)
                 deleted_paths.append(path)

@@ -1,5 +1,4 @@
 import os
-from collections import OrderedDict
 
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -9,15 +8,17 @@ from PyQt5.QtWidgets import (
     QDialog
 )
 from PyQt5.QtGui import QPixmap, QFont, QTransform, QKeySequence, QColor, QKeyEvent
-from PyQt5.QtCore import Qt, QSize, QTimer, QEvent
+from PyQt5.QtCore import Qt, QSize, QEvent
 
 from dialogs.duplicate_detail_dialog import DuplicateDetailDialog
 from dialogs.storage_clean_dialog import StorageCleanDialog
 from dialogs.folder_select_dialog import FolderSelectDialog
 from dialogs.shortcut_input_dialog import ShortcutInputDialog
 from dialogs.hash_analysis_dialog import HashAnalysisDialog
+from dialogs.settings_dialog import SettingsDialog
 from core.debug_manager import debug_manager
 from core.utils import key_to_string
+from core.theme_manager import theme_manager
 from presenters.main_presenter import MainPresenter
 from widgets.scrolling_label import ScrollingLabel
 
@@ -28,21 +29,15 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("图片分类器")
         self.setGeometry(100, 100, 1200, 800)
 
-        # 阈值滑块防抖定时器：拖动时只更新数字显示，停止 300ms 后才执行重分组
-        self._threshold_timer = QTimer(self)
-        self._threshold_timer.setSingleShot(True)
-        self._threshold_timer.setInterval(300)
-        self._threshold_timer.timeout.connect(self._apply_threshold)
-        self._pending_threshold = None
-
-        # 图片缓存（LRU）：避免重复解码大图，提升切换浏览速度
-        self._image_cache = OrderedDict()
-        self._image_cache_max = 10
-
         self.presenter = MainPresenter(self)
         self.init_ui()
         self.connect_signals()
         self.presenter.load_initial_data()
+
+        if hasattr(self, 'undo_btn'):
+            self.undo_btn.setEnabled(False)
+
+        theme_manager.theme_changed.connect(self.on_theme_changed)
 
         debug_manager.log_info('主窗口初始化完成', 'main')
 
@@ -51,74 +46,84 @@ class MainWindow(QMainWindow):
         self.presenter.on_app_close()
         super().closeEvent(event)
 
+    def on_theme_changed(self, colors):
+        """主题变化时重新应用样式。"""
+        self._apply_theme()
+        self.status_label.setStyleSheet(f"color: {colors.text_secondary}; font-size: 12px;")
+
     def init_ui(self):
-        self.setStyleSheet("""
-            QMainWindow {
-                background-color: #2d2d2d;
-            }
-            QWidget {
-                background-color: #2d2d2d;
-                color: #ffffff;
-            }
-            QGroupBox {
+        self._apply_theme()
+
+    def _apply_theme(self):
+        c = theme_manager.colors
+        stylesheet = f"""
+            QMainWindow {{
+                background-color: {c.window_bg};
+            }}
+            QWidget {{
+                background-color: {c.widget_bg};
+                color: {c.text_primary};
+            }}
+            QGroupBox {{
                 font-weight: bold;
-                color: #ecf0f1;
-                border: 1px solid #34495e;
+                color: {c.text_primary};
+                border: 1px solid {c.group_box_border};
                 border-radius: 5px;
                 margin-top: 10px;
                 padding-top: 15px;
-            }
-            QGroupBox::title {
+            }}
+            QGroupBox::title {{
                 subcontrol-origin: margin;
                 left: 10px;
                 padding: 0 5px 0 5px;
-                color: #3498db;
-            }
-            QPushButton {
-                background-color: #34495e;
-                color: #ecf0f1;
-                border: 1px solid #2c3e50;
+                color: {c.group_box_title};
+            }}
+            QPushButton {{
+                background-color: {c.button_bg};
+                color: {c.text_primary};
+                border: 1px solid {c.button_border};
                 border-radius: 3px;
                 padding: 6px 12px;
                 min-width: 80px;
-            }
-            QPushButton:hover {
-                background-color: #3d566e;
-            }
-            QPushButton:pressed {
-                background-color: #2c3e50;
-            }
-            QLabel {
-                color: #ecf0f1;
-            }
-            QComboBox {
-                background-color: #34495e;
-                color: #ecf0f1;
-                border: 1px solid #2c3e50;
+            }}
+            QPushButton:hover {{
+                background-color: {c.button_hover};
+            }}
+            QPushButton:pressed {{
+                background-color: {c.button_pressed};
+            }}
+            QLabel {{
+                color: {c.text_primary};
+            }}
+            QComboBox {{
+                background-color: {c.button_bg};
+                color: {c.text_primary};
+                border: 1px solid {c.button_border};
                 border-radius: 3px;
                 padding: 4px;
-            }
-            QListWidget {
-                background-color: #1e1e1e;
-                color: #ecf0f1;
-                border: 1px solid #2c3e50;
+            }}
+            QListWidget {{
+                background-color: {c.list_bg};
+                color: {c.text_primary};
+                border: 1px solid {c.border_light};
                 border-radius: 3px;
-            }
-            QSlider::groove:horizontal {
+            }}
+            QSlider::groove:horizontal {{
                 height: 6px;
-                background: #2c3e50;
+                background: {c.slider_groove};
                 border-radius: 3px;
-            }
-            QSlider::handle:horizontal {
-                background: #3498db;
+            }}
+            QSlider::handle:horizontal {{
+                background: {c.slider_handle};
                 width: 16px;
                 margin: -5px 0;
                 border-radius: 8px;
-            }
-            QScrollArea {
+            }}
+            QScrollArea {{
                 border: none;
-            }
-        """)
+            }}
+        """
+        self.setStyleSheet(stylesheet)
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -127,8 +132,9 @@ class MainWindow(QMainWindow):
         left_panel = self._create_left_panel()
         right_panel = self._create_right_panel()
 
+        c = theme_manager.colors
         splitter = QSplitter(Qt.Horizontal)
-        splitter.setStyleSheet("QSplitter::handle { background-color: #34495e; }")
+        splitter.setStyleSheet(f"QSplitter::handle {{ background-color: {c.border}; }}")
         splitter.addWidget(left_panel)
         splitter.addWidget(right_panel)
         splitter.setSizes([300, 900])
@@ -142,17 +148,19 @@ class MainWindow(QMainWindow):
         layout.setSpacing(8)
         layout.setContentsMargins(10, 10, 10, 10)
 
+        c = theme_manager.colors
         select_btn = QPushButton("选择图片文件夹")
         select_btn.clicked.connect(self.select_folder)
-        select_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #3498db;
-                border-color: #2980b9;
+        select_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {c.accent};
+                border-color: {c.accent_hover};
                 font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #2980b9;
-            }
+                color: white;
+            }}
+            QPushButton:hover {{
+                background-color: {c.accent_hover};
+            }}
         """)
         layout.addWidget(select_btn)
 
@@ -164,39 +172,43 @@ class MainWindow(QMainWindow):
         self.recent_combo.setFocusPolicy(Qt.NoFocus)
         layout.addWidget(self.recent_combo)
 
-        status_layout = QHBoxLayout()
-        status_layout.setContentsMargins(0, 0, 0, 0)
-        status_layout.setSpacing(6)
+        status_container = QWidget()
+        status_container_layout = QVBoxLayout(status_container)
+        status_container_layout.setContentsMargins(0, 0, 0, 0)
+        status_container_layout.setSpacing(2)
 
+        c = theme_manager.colors
         self.status_label = ScrollingLabel()
         self.status_label.setText("请选择图片文件夹开始分类")
-        self.status_label.setStyleSheet("color: #95a5a6; font-size: 12px;")
+        self.status_label.setStyleSheet(f"color: {c.text_secondary}; font-size: 12px;")
         self.status_label.setScrollSpeed(30)
         self.status_label.setMinimumHeight(20)
         self.status_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        status_layout.addWidget(self.status_label)
+        status_container_layout.addWidget(self.status_label)
 
         # 最小化哈希分析弹窗后显示的恢复按钮，默认隐藏
+        # 使用单独一行布局，避免挤压状态标签的显示空间
+        c = theme_manager.colors
         self.restore_hash_dialog_btn = QToolButton()
-        self.restore_hash_dialog_btn.setText("恢复分析")
-        self.restore_hash_dialog_btn.setStyleSheet("""
-            QToolButton {
-                background-color: #3498db;
+        self.restore_hash_dialog_btn.setText("查看分析状态")
+        self.restore_hash_dialog_btn.setStyleSheet(f"""
+            QToolButton {{
+                background-color: {c.accent};
                 color: white;
                 border: none;
                 border-radius: 3px;
                 padding: 2px 8px;
                 font-size: 11px;
-            }
-            QToolButton:hover {
-                background-color: #2980b9;
-            }
+            }}
+            QToolButton:hover {{
+                background-color: {c.accent_hover};
+            }}
         """)
         self.restore_hash_dialog_btn.setVisible(False)
         self.restore_hash_dialog_btn.clicked.connect(self.restore_hash_dialog)
-        status_layout.addWidget(self.restore_hash_dialog_btn)
+        status_container_layout.addWidget(self.restore_hash_dialog_btn)
 
-        layout.addLayout(status_layout)
+        layout.addWidget(status_container)
 
         threshold_group = QGroupBox("相似度阈值")
         threshold_group.setVisible(True)
@@ -205,8 +217,9 @@ class MainWindow(QMainWindow):
 
         slider_layout = QHBoxLayout()
         slider_layout.setSpacing(2)
+        c = theme_manager.colors
         slider_label = QLabel("阈值:")
-        slider_label.setStyleSheet("color: #3498db;")
+        slider_label.setStyleSheet(f"color: {c.accent};")
         slider_layout.addWidget(slider_label)
 
         self.threshold_slider = QSlider(Qt.Horizontal)
@@ -218,74 +231,78 @@ class MainWindow(QMainWindow):
         slider_layout.addWidget(self.threshold_slider)
 
         # 减号按钮
+        c = theme_manager.colors
         self.threshold_minus_btn = QToolButton()
         self.threshold_minus_btn.setText("−")
         self.threshold_minus_btn.setFixedSize(16, 16)
-        self.threshold_minus_btn.setStyleSheet("""
-            QToolButton {
-                background-color: #34495e;
-                color: #ecf0f1;
-                border: 1px solid #2c3e50;
+        self.threshold_minus_btn.setStyleSheet(f"""
+            QToolButton {{
+                background-color: {c.button_bg};
+                color: {c.text_primary};
+                border: 1px solid {c.button_border};
                 border-radius: 2px;
                 font-size: 13px;
                 font-weight: bold;
                 padding: 0px;
                 margin: 0px;
-            }
-            QToolButton:hover { background-color: #3d566e; }
-            QToolButton:pressed { background-color: #2c3e50; }
-            QToolButton:disabled { background-color: #2c3e50; color: #7f8c8d; }
+            }}
+            QToolButton:hover {{ background-color: {c.button_hover}; }}
+            QToolButton:pressed {{ background-color: {c.button_pressed}; }}
+            QToolButton:disabled {{ background-color: {c.button_pressed}; color: {c.text_disabled}; }}
         """)
         self.threshold_minus_btn.clicked.connect(self.on_threshold_minus)
         slider_layout.addWidget(self.threshold_minus_btn)
 
         # 数值输入框（可键盘输入）
+        c = theme_manager.colors
         self.threshold_value_edit = QLineEdit("10")
         self.threshold_value_edit.setFixedWidth(30)
         self.threshold_value_edit.setAlignment(Qt.AlignCenter)
         self.threshold_value_edit.setMaxLength(2)
-        self.threshold_value_edit.setStyleSheet("""
-            QLineEdit {
-                background-color: #1e1e1e;
-                color: #3498db;
+        self.threshold_value_edit.setStyleSheet(f"""
+            QLineEdit {{
+                background-color: {c.input_bg};
+                color: {c.accent};
                 font-weight: bold;
-                border: 1px solid #2c3e50;
+                border: 1px solid {c.border_light};
                 border-radius: 2px;
                 padding: 0px;
                 font-size: 12px;
-            }
-            QLineEdit:focus { border: 1px solid #3498db; }
+            }}
+            QLineEdit:focus {{ border: 1px solid {c.accent}; }}
         """)
         self.threshold_value_edit.returnPressed.connect(self.on_threshold_edit_finished)
         self.threshold_value_edit.editingFinished.connect(self.on_threshold_edit_finished)
         slider_layout.addWidget(self.threshold_value_edit)
 
         # 加号按钮
+        c = theme_manager.colors
         self.threshold_plus_btn = QToolButton()
         self.threshold_plus_btn.setText("+")
         self.threshold_plus_btn.setFixedSize(16, 16)
-        self.threshold_plus_btn.setStyleSheet("""
-            QToolButton {
-                background-color: #34495e;
-                color: #ecf0f1;
-                border: 1px solid #2c3e50;
+        self.threshold_plus_btn.setStyleSheet(f"""
+            QToolButton {{
+                background-color: {c.button_bg};
+                color: {c.text_primary};
+                border: 1px solid {c.button_border};
                 border-radius: 2px;
                 font-size: 13px;
                 font-weight: bold;
                 padding: 0px;
                 margin: 0px;
-            }
-            QToolButton:hover { background-color: #3d566e; }
-            QToolButton:pressed { background-color: #2c3e50; }
-            QToolButton:disabled { background-color: #2c3e50; color: #7f8c8d; }
+            }}
+            QToolButton:hover {{ background-color: {c.button_hover}; }}
+            QToolButton:pressed {{ background-color: {c.button_pressed}; }}
+            QToolButton:disabled {{ background-color: {c.button_pressed}; color: {c.text_disabled}; }}
         """)
         self.threshold_plus_btn.clicked.connect(self.on_threshold_plus)
         slider_layout.addWidget(self.threshold_plus_btn)
 
         threshold_layout.addLayout(slider_layout)
 
+        c = theme_manager.colors
         threshold_tip = QLabel("阈值越小，相似度要求越高 (2-25)")
-        threshold_tip.setStyleSheet("color: #7f8c8d; font-size: 11px;")
+        threshold_tip.setStyleSheet(f"color: {c.text_hint}; font-size: 11px;")
         threshold_layout.addWidget(threshold_tip)
 
         layout.addWidget(threshold_group)
@@ -315,18 +332,24 @@ class MainWindow(QMainWindow):
         duplicate_group = self._create_duplicate_group()
         layout.addWidget(duplicate_group)
 
+        c = theme_manager.colors
         storage_btn = QPushButton("清除存储占用")
-        storage_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #e74c3c;
-                border-color: #c0392b;
-            }
-            QPushButton:hover {
-                background-color: #c0392b;
-            }
+        storage_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {c.danger};
+                border-color: {c.danger_pressed};
+                color: white;
+            }}
+            QPushButton:hover {{
+                background-color: {c.danger_hover};
+            }}
         """)
         storage_btn.clicked.connect(self.clear_storage)
         layout.addWidget(storage_btn)
+
+        settings_btn = QPushButton("设置")
+        settings_btn.clicked.connect(self.show_settings)
+        layout.addWidget(settings_btn)
 
         return panel
 
@@ -338,6 +361,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(6)
         layout.setContentsMargins(6, 6, 6, 6)
 
+        c = theme_manager.colors
         self.duplicate_list = QListWidget()
         self.duplicate_list.setMinimumHeight(100)
         self.duplicate_list.setMaximumHeight(180)
@@ -345,29 +369,29 @@ class MainWindow(QMainWindow):
         self.duplicate_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.duplicate_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.duplicate_list.setFocusPolicy(Qt.NoFocus)
-        self.duplicate_list.setStyleSheet("""
-            QListWidget {
-                background-color: #1e1e1e;
-                border: 1px solid #34495e;
+        self.duplicate_list.setStyleSheet(f"""
+            QListWidget {{
+                background-color: {c.list_bg};
+                border: 1px solid {c.border};
                 border-radius: 3px;
-                color: #ecf0f1;
+                color: {c.text_primary};
                 font-size: 13px;
-            }
-            QListWidget::item {
+            }}
+            QListWidget::item {{
                 padding: 5px 8px;
-                border-bottom: 1px solid #2c3e50;
+                border-bottom: 1px solid {c.border_light};
                 height: 32px;
-            }
-            QListWidget::item:alternate {
-                background-color: #252525;
-            }
-            QListWidget::item:hover {
-                background-color: #34495e;
-            }
-            QListWidget::item:selected {
-                background-color: #34495e;
-                color: #ecf0f1;
-            }
+            }}
+            QListWidget::item:alternate {{
+                background-color: {c.item_alternate};
+            }}
+            QListWidget::item:hover {{
+                background-color: {c.item_hover};
+            }}
+            QListWidget::item:selected {{
+                background-color: {c.item_selected};
+                color: {c.text_primary};
+            }}
         """)
         self.duplicate_list.itemClicked.connect(self.on_duplicate_item_clicked)
         layout.addWidget(self.duplicate_list)
@@ -380,46 +404,48 @@ class MainWindow(QMainWindow):
         row1_layout = QHBoxLayout()
         row1_layout.setSpacing(4)
 
+        c = theme_manager.colors
         select_all_btn = QPushButton("全选")
         select_all_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        select_all_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #3498db;
-                border: 1px solid #2980b9;
+        select_all_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {c.accent};
+                border: 1px solid {c.accent_hover};
                 border-radius: 3px;
                 color: white;
                 padding: 5px 8px;
                 font-size: 12px;
                 font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #2980b9;
-            }
-            QPushButton:pressed {
-                background-color: #1a5276;
-            }
+            }}
+            QPushButton:hover {{
+                background-color: {c.accent_hover};
+            }}
+            QPushButton:pressed {{
+                background-color: {c.accent_dark};
+            }}
         """)
         select_all_btn.clicked.connect(self.select_all_duplicates)
         row1_layout.addWidget(select_all_btn)
 
+        c = theme_manager.colors
         deselect_all_btn = QPushButton("取消")
         deselect_all_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        deselect_all_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #7f8c8d;
-                border: 1px solid #707b7c;
+        deselect_all_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {c.neutral};
+                border: 1px solid {c.neutral_pressed};
                 border-radius: 3px;
                 color: white;
                 padding: 5px 8px;
                 font-size: 12px;
                 font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #95a5a6;
-            }
-            QPushButton:pressed {
-                background-color: #566573;
-            }
+            }}
+            QPushButton:hover {{
+                background-color: {c.neutral_hover};
+            }}
+            QPushButton:pressed {{
+                background-color: {c.neutral_pressed};
+            }}
         """)
         deselect_all_btn.clicked.connect(self.deselect_all_duplicates)
         row1_layout.addWidget(deselect_all_btn)
@@ -430,46 +456,48 @@ class MainWindow(QMainWindow):
         row2_layout = QHBoxLayout()
         row2_layout.setSpacing(4)
 
+        c = theme_manager.colors
         view_btn = QPushButton("查看")
         view_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        view_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #9b59b6;
-                border: 1px solid #8e44ad;
+        view_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {c.info};
+                border: 1px solid {c.info_hover};
                 border-radius: 3px;
                 color: white;
                 padding: 5px 8px;
                 font-size: 12px;
                 font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #8e44ad;
-            }
-            QPushButton:pressed {
-                background-color: #6c3483;
-            }
+            }}
+            QPushButton:hover {{
+                background-color: {c.info_hover};
+            }}
+            QPushButton:pressed {{
+                background-color: {c.info_pressed};
+            }}
         """)
         view_btn.clicked.connect(self.show_duplicate_detail)
         row2_layout.addWidget(view_btn)
 
+        c = theme_manager.colors
         delete_btn = QPushButton("删除")
         delete_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        delete_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #e74c3c;
-                border: 1px solid #c0392b;
+        delete_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {c.danger};
+                border: 1px solid {c.danger_pressed};
                 border-radius: 3px;
                 color: white;
                 padding: 5px 8px;
                 font-size: 12px;
                 font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #c0392b;
-            }
-            QPushButton:pressed {
-                background-color: #922b21;
-            }
+            }}
+            QPushButton:hover {{
+                background-color: {c.danger_hover};
+            }}
+            QPushButton:pressed {{
+                background-color: {c.danger_pressed};
+            }}
         """)
         delete_btn.clicked.connect(self.delete_selected_duplicates)
         row2_layout.addWidget(delete_btn)
@@ -484,14 +512,15 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(panel)
         layout.setSpacing(12)
 
+        c = theme_manager.colors
         self.image_label = QLabel()
         self.image_label.setAlignment(Qt.AlignCenter)
-        self.image_label.setStyleSheet("""
-            QLabel {
-                background-color: #1a1a1a;
-                border: 2px solid #34495e;
+        self.image_label.setStyleSheet(f"""
+            QLabel {{
+                background-color: {c.image_bg};
+                border: 2px solid {c.border};
                 border-radius: 6px;
-            }
+            }}
         """)
         self.image_label.setMinimumHeight(300)
         layout.addWidget(self.image_label, 1)
@@ -500,32 +529,35 @@ class MainWindow(QMainWindow):
         self.info_layout.setSpacing(16)
         self.info_layout.setContentsMargins(4, 0, 4, 0)
 
+        c = theme_manager.colors
         self.group_info_label = QLabel("组: /")
-        self.group_info_label.setStyleSheet("color: #3498db; font-weight: bold; font-size: 13px;")
+        self.group_info_label.setStyleSheet(f"color: {c.accent}; font-weight: bold; font-size: 13px;")
         self.info_layout.addWidget(self.group_info_label)
 
+        c = theme_manager.colors
         self.image_info_label = QLabel("图片: /")
-        self.image_info_label.setStyleSheet("color: #9b59b6; font-weight: bold; font-size: 13px;")
+        self.image_info_label.setStyleSheet(f"color: {c.info}; font-weight: bold; font-size: 13px;")
         self.info_layout.addWidget(self.image_info_label)
 
+        c = theme_manager.colors
         self.path_label = QLineEdit()
-        self.path_label.setStyleSheet("""
-            QLineEdit {
+        self.path_label.setStyleSheet(f"""
+            QLineEdit {{
                 background-color: transparent;
-                color: #7f8c8d;
+                color: {c.text_hint};
                 font-size: 12px;
                 border: none;
                 border-bottom: 1px solid transparent;
                 padding: 0px;
-            }
-            QLineEdit:hover {
-                border-bottom: 1px solid #34495e;
-            }
-            QLineEdit:focus {
-                border-bottom: 1px solid #3498db;
-                color: #ecf0f1;
-                background-color: #1e1e1e;
-            }
+            }}
+            QLineEdit:hover {{
+                border-bottom: 1px solid {c.border};
+            }}
+            QLineEdit:focus {{
+                border-bottom: 1px solid {c.accent};
+                color: {c.text_primary};
+                background-color: {c.list_bg};
+            }}
         """)
         self.path_label.setReadOnly(False)
         self.path_label.setCursorPosition(0)
@@ -534,11 +566,12 @@ class MainWindow(QMainWindow):
         self.path_label.textChanged.connect(self.on_path_label_text_changed)
         self.path_label.installEventFilter(self)
 
+        c = theme_manager.colors
         self.cancel_rename_btn = QToolButton()
         self.cancel_rename_btn.setText("✕")
-        self.cancel_rename_btn.setStyleSheet("""
-            QToolButton {
-                background-color: #e74c3c;
+        self.cancel_rename_btn.setStyleSheet(f"""
+            QToolButton {{
+                background-color: {c.danger};
                 color: white;
                 font-size: 12px;
                 border: none;
@@ -546,17 +579,18 @@ class MainWindow(QMainWindow):
                 padding: 2px 8px;
                 min-width: 24px;
                 min-height: 20px;
-            }
-            QToolButton:hover {
-                background-color: #ff6b6b;
-            }
-            QToolButton:pressed {
-                background-color: #c0392b;
-            }
+            }}
+            QToolButton:hover {{
+                background-color: {c.danger_hover};
+            }}
+            QToolButton:pressed {{
+                background-color: {c.danger_pressed};
+            }}
         """)
         self.cancel_rename_btn.clicked.connect(self.on_cancel_rename)
         self.cancel_rename_btn.hide()
         self.cancel_rename_btn.setAutoRaise(False)
+        
 
         self.path_container = QWidget()
         self.path_container_layout = QHBoxLayout(self.path_container)
@@ -581,83 +615,87 @@ class MainWindow(QMainWindow):
         view_layout = QHBoxLayout()
         view_layout.setSpacing(6)
 
+        c = theme_manager.colors
         rotate_180_ccw_btn = QPushButton("↻ 180°逆 (Ctrl+↑)")
         rotate_180_ccw_btn.clicked.connect(lambda: self.rotate_image(False, 180))
-        rotate_180_ccw_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #34495e;
-                border: 1px solid #2c3e50;
+        rotate_180_ccw_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {c.button_bg};
+                border: 1px solid {c.button_border};
                 border-radius: 5px;
                 padding: 7px 10px;
                 font-size: 12px;
-                color: #ecf0f1;
-            }
-            QPushButton:hover {
-                background-color: #3d566e;
-            }
-            QPushButton:pressed {
-                background-color: #2c3e50;
-            }
+                color: {c.text_primary};
+            }}
+            QPushButton:hover {{
+                background-color: {c.button_hover};
+            }}
+            QPushButton:pressed {{
+                background-color: {c.button_pressed};
+            }}
         """)
         view_layout.addWidget(rotate_180_ccw_btn)
 
+        c = theme_manager.colors
         rotate_ccw_btn = QPushButton("↻ 90°逆 (Ctrl+←)")
         rotate_ccw_btn.clicked.connect(lambda: self.rotate_image(False))
-        rotate_ccw_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #34495e;
-                border: 1px solid #2c3e50;
+        rotate_ccw_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {c.button_bg};
+                border: 1px solid {c.button_border};
                 border-radius: 5px;
                 padding: 7px 10px;
                 font-size: 12px;
-                color: #ecf0f1;
-            }
-            QPushButton:hover {
-                background-color: #3d566e;
-            }
-            QPushButton:pressed {
-                background-color: #2c3e50;
-            }
+                color: {c.text_primary};
+            }}
+            QPushButton:hover {{
+                background-color: {c.button_hover};
+            }}
+            QPushButton:pressed {{
+                background-color: {c.button_pressed};
+            }}
         """)
         view_layout.addWidget(rotate_ccw_btn)
 
+        c = theme_manager.colors
         rotate_cw_btn = QPushButton("↺ 90°顺 (Ctrl+→)")
         rotate_cw_btn.clicked.connect(lambda: self.rotate_image(True))
-        rotate_cw_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #34495e;
-                border: 1px solid #2c3e50;
+        rotate_cw_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {c.button_bg};
+                border: 1px solid {c.button_border};
                 border-radius: 5px;
                 padding: 7px 10px;
                 font-size: 12px;
-                color: #ecf0f1;
-            }
-            QPushButton:hover {
-                background-color: #3d566e;
-            }
-            QPushButton:pressed {
-                background-color: #2c3e50;
-            }
+                color: {c.text_primary};
+            }}
+            QPushButton:hover {{
+                background-color: {c.button_hover};
+            }}
+            QPushButton:pressed {{
+                background-color: {c.button_pressed};
+            }}
         """)
         view_layout.addWidget(rotate_cw_btn)
 
+        c = theme_manager.colors
         rotate_180_cw_btn = QPushButton("↺ 180°顺 (Ctrl+↓)")
         rotate_180_cw_btn.clicked.connect(lambda: self.rotate_image(True, 180))
-        rotate_180_cw_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #34495e;
-                border: 1px solid #2c3e50;
+        rotate_180_cw_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {c.button_bg};
+                border: 1px solid {c.button_border};
                 border-radius: 5px;
                 padding: 7px 10px;
                 font-size: 12px;
-                color: #ecf0f1;
-            }
-            QPushButton:hover {
-                background-color: #3d566e;
-            }
-            QPushButton:pressed {
-                background-color: #2c3e50;
-            }
+                color: {c.text_primary};
+            }}
+            QPushButton:hover {{
+                background-color: {c.button_hover};
+            }}
+            QPushButton:pressed {{
+                background-color: {c.button_pressed};
+            }}
         """)
         view_layout.addWidget(rotate_180_cw_btn)
 
@@ -666,93 +704,125 @@ class MainWindow(QMainWindow):
         switch_layout = QHBoxLayout()
         switch_layout.setSpacing(6)
 
+        c = theme_manager.colors
         prev_group_btn = QPushButton("上一组 (↑)")
         prev_group_btn.setShortcut("Up")
         prev_group_btn.clicked.connect(self.prev_group)
-        prev_group_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #27ae60;
-                border: 1px solid #1e8449;
+        prev_group_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {c.success};
+                border: 1px solid {c.success_pressed};
                 border-radius: 5px;
                 padding: 7px 10px;
                 font-size: 12px;
-                color: #ffffff;
+                color: {c.text_on_accent};
                 font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #2ecc71;
-            }
-            QPushButton:pressed {
-                background-color: #1e8449;
-            }
+            }}
+            QPushButton:hover {{
+                background-color: {c.success_hover};
+            }}
+            QPushButton:pressed {{
+                background-color: {c.success_pressed};
+            }}
         """)
         switch_layout.addWidget(prev_group_btn)
 
+        c = theme_manager.colors
         prev_img_btn = QPushButton("上一张 (←)")
         prev_img_btn.setShortcut("Left")
         prev_img_btn.clicked.connect(self.prev_image)
-        prev_img_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #27ae60;
-                border: 1px solid #1e8449;
+        prev_img_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {c.success};
+                border: 1px solid {c.success_pressed};
                 border-radius: 5px;
                 padding: 7px 10px;
                 font-size: 12px;
-                color: #ffffff;
+                color: {c.text_on_accent};
                 font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #2ecc71;
-            }
-            QPushButton:pressed {
-                background-color: #1e8449;
-            }
+            }}
+            QPushButton:hover {{
+                background-color: {c.success_hover};
+            }}
+            QPushButton:pressed {{
+                background-color: {c.success_pressed};
+            }}
         """)
         switch_layout.addWidget(prev_img_btn)
 
+        c = theme_manager.colors
         next_img_btn = QPushButton("下一张 (→)")
         next_img_btn.setShortcut("Right")
         next_img_btn.clicked.connect(self.next_image)
-        next_img_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #27ae60;
-                border: 1px solid #1e8449;
+        next_img_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {c.success};
+                border: 1px solid {c.success_pressed};
                 border-radius: 5px;
                 padding: 7px 10px;
                 font-size: 12px;
-                color: #ffffff;
+                color: {c.text_on_accent};
                 font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #2ecc71;
-            }
-            QPushButton:pressed {
-                background-color: #1e8449;
-            }
+            }}
+            QPushButton:hover {{
+                background-color: {c.success_hover};
+            }}
+            QPushButton:pressed {{
+                background-color: {c.success_pressed};
+            }}
         """)
         switch_layout.addWidget(next_img_btn)
 
+        c = theme_manager.colors
         next_group_btn = QPushButton("下一组 (↓)")
         next_group_btn.setShortcut("Down")
         next_group_btn.clicked.connect(self.next_group)
-        next_group_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #27ae60;
-                border: 1px solid #1e8449;
+        next_group_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {c.success};
+                border: 1px solid {c.success_pressed};
                 border-radius: 5px;
                 padding: 7px 10px;
                 font-size: 12px;
-                color: #ffffff;
+                color: {c.text_on_accent};
                 font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #2ecc71;
-            }
-            QPushButton:pressed {
-                background-color: #1e8449;
-            }
+            }}
+            QPushButton:hover {{
+                background-color: {c.success_hover};
+            }}
+            QPushButton:pressed {{
+                background-color: {c.success_pressed};
+            }}
         """)
         switch_layout.addWidget(next_group_btn)
+
+        c = theme_manager.colors
+        undo_btn = QPushButton("撤回 (Ctrl+Z)")
+        undo_btn.setShortcut("Ctrl+Z")
+        undo_btn.clicked.connect(self.undo_classify)
+        undo_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {c.warning};
+                border: 1px solid {c.warning_pressed};
+                border-radius: 5px;
+                padding: 7px 10px;
+                font-size: 12px;
+                color: {c.text_on_accent};
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: {c.warning_hover};
+            }}
+            QPushButton:pressed {{
+                background-color: {c.warning_pressed};
+            }}
+            QPushButton:disabled {{
+                background-color: {c.text_disabled};
+                border-color: {c.text_disabled};
+            }}
+        """)
+        self.undo_btn = undo_btn
+        switch_layout.addWidget(undo_btn)
 
         layout.addLayout(switch_layout)
 
@@ -789,22 +859,21 @@ class MainWindow(QMainWindow):
                 if self.path_label.isReadOnly():
                     self.path_label.setReadOnly(False)
                     self.path_label.setFocus()
+                    self.cancel_rename_btn.show()
                     return True
         return super().eventFilter(obj, event)
 
     def keyPressEvent(self, event: QKeyEvent):
-        """捕获按键，匹配快捷键映射触发分类。
+        """捕获按键，委托给 Presenter 处理快捷键映射。
 
         当文件名输入框或阈值输入框有焦点时不拦截，保证正常编辑。
         修饰键单独按下（Ctrl/Shift/Alt）不触发分类。
         """
-        # 输入框聚焦时放行，避免编辑文件名/阈值时误触发分类
         if self.path_label.hasFocus() or self.threshold_value_edit.hasFocus():
             super().keyPressEvent(event)
             return
 
         key = event.key()
-        # 忽略纯修饰键
         if key in (Qt.Key_Control, Qt.Key_Shift, Qt.Key_Alt, Qt.Key_Meta):
             super().keyPressEvent(event)
             return
@@ -815,22 +884,29 @@ class MainWindow(QMainWindow):
             return
 
         key_str = key_str.lower()
-        shortcuts = self.presenter.get_shortcuts()
-        if key_str in shortcuts:
-            debug_manager.log_info('快捷键触发分类', 'shortcut', key=key_str)
-            self.presenter.classify_image(key_str)
+        if self.presenter.handle_key_press(key_str):
             event.accept()
         else:
             super().keyPressEvent(event)
 
     def show_current_image(self):
         current_path = self.presenter.get_current_image_path()
+        debug_manager.log_info('show_current_image', 'image', 
+                              current_path=current_path,
+                              path_exists=os.path.exists(current_path) if current_path else False)
         if not current_path or not os.path.exists(current_path):
-            self.image_label.clear()
-            self.group_info_label.setText("组: /")
-            self.image_info_label.setText("图片: /")
-            self.path_label.setText("")
-            return
+            debug_manager.log_warning('show_current_image: 路径为空或不存在，尝试刷新', 'image')
+            self.presenter.refresh_groups()
+            current_path = self.presenter.get_current_image_path()
+            debug_manager.log_info('show_current_image: 刷新后路径', 'image', 
+                                  current_path=current_path,
+                                  path_exists=os.path.exists(current_path) if current_path else False)
+            if not current_path or not os.path.exists(current_path):
+                self.image_label.clear()
+                self.group_info_label.setText("组: /")
+                self.image_info_label.setText("图片: /")
+                self.path_label.setText("")
+                return
 
         total_groups = self.presenter.get_total_groups()
         current_group_index = self.presenter.get_current_group_index()
@@ -840,28 +916,22 @@ class MainWindow(QMainWindow):
         self.group_info_label.setText(f"组: {current_group_index + 1}/{total_groups}")
         self.image_info_label.setText(f"图片: {current_image_index + 1}/{current_group_size}")
 
-        # 仅显示文件名；用户正在编辑时不覆盖
         filename = os.path.basename(current_path)
+        filename_no_ext = os.path.splitext(filename)[0]
         if not self.path_label.hasFocus():
-            self.path_label.setText(filename)
+            self.path_label.setText(filename_no_ext)
             self.path_label.setCursorPosition(0)
             self.cancel_rename_btn.show()
             debug_manager.log_info('测试：强制显示取消按钮', 'rename', is_visible=self.cancel_rename_btn.isVisible())
 
         try:
-            # 从 LRU 缓存读取原图，避免重复磁盘解码
-            if current_path in self._image_cache:
-                pixmap = self._image_cache.pop(current_path)
-                self._image_cache[current_path] = pixmap
-            else:
+            pixmap = self.presenter.get_image_from_cache(current_path)
+            if pixmap is None:
                 pixmap = QPixmap(current_path)
                 if pixmap.isNull():
                     self.image_label.setText("无法加载图片")
                     return
-                # 缓存原图
-                self._image_cache[current_path] = pixmap
-                if len(self._image_cache) > self._image_cache_max:
-                    self._image_cache.popitem(last=False)
+                self.presenter.cache_image(current_path, pixmap)
 
             rotation = self.presenter.get_current_rotation()
             if rotation != 0:
@@ -880,10 +950,12 @@ class MainWindow(QMainWindow):
         """用户在文件名输入框按 Enter 时触发重命名。"""
         new_filename = self.path_label.text().strip()
         if not new_filename:
-            # 空文件名：恢复原文件名
+            # 空文件名：恢复原文件名（不含扩展名）
             current_path = self.presenter.get_current_image_path()
             if current_path:
-                self.path_label.setText(os.path.basename(current_path))
+                filename = os.path.basename(current_path)
+                filename_no_ext = os.path.splitext(filename)[0]
+                self.path_label.setText(filename_no_ext)
             return
         success, message = self.presenter.rename_current_image(new_filename)
         if success:
@@ -894,10 +966,12 @@ class MainWindow(QMainWindow):
             self.path_label.clearFocus()
         else:
             self.set_status(f"重命名失败: {message}")
-            # 失败时恢复原文件名
+            # 失败时恢复原文件名（不含扩展名）
             current_path = self.presenter.get_current_image_path()
             if current_path:
-                self.path_label.setText(os.path.basename(current_path))
+                filename = os.path.basename(current_path)
+                filename_no_ext = os.path.splitext(filename)[0]
+                self.path_label.setText(filename_no_ext)
 
     def on_filename_editing_finished(self):
         """文件名输入框失去焦点时：若内容有变化则恢复原始文件名。
@@ -909,8 +983,9 @@ class MainWindow(QMainWindow):
         if not current_path:
             return
         current_filename = os.path.basename(current_path)
-        if self.path_label.text() != current_filename:
-            self.path_label.setText(current_filename)
+        current_filename_no_ext = os.path.splitext(current_filename)[0]
+        if self.path_label.text() != current_filename_no_ext:
+            self.path_label.setText(current_filename_no_ext)
             self.path_label.setCursorPosition(0)
 
     def on_path_label_text_changed(self, text):
@@ -925,9 +1000,10 @@ class MainWindow(QMainWindow):
             return
         
         original_filename = os.path.basename(current_path)
-        debug_manager.log_info('原始文件名', 'rename', original_filename=original_filename)
+        original_filename_no_ext = os.path.splitext(original_filename)[0]
+        debug_manager.log_info('原始文件名（不含扩展名）', 'rename', original_filename=original_filename_no_ext)
         
-        if text != original_filename:
+        if text != original_filename_no_ext:
             debug_manager.log_info('文件名有变化，显示取消按钮', 'rename')
             self.cancel_rename_btn.show()
             debug_manager.log_info('按钮显示状态', 'rename', is_visible=self.cancel_rename_btn.isVisible(), btn_geometry=self.cancel_rename_btn.geometry())
@@ -952,8 +1028,9 @@ class MainWindow(QMainWindow):
         
         if current_path:
             original_filename = os.path.basename(current_path)
-            debug_manager.log_info('恢复原始文件名', 'rename', original_filename=original_filename)
-            self.path_label.setText(original_filename)
+            original_filename_no_ext = os.path.splitext(original_filename)[0]
+            debug_manager.log_info('恢复原始文件名（不含扩展名）', 'rename', original_filename=original_filename_no_ext)
+            self.path_label.setText(original_filename_no_ext)
         else:
             debug_manager.log_info('当前路径为空，无法恢复文件名', 'rename')
         
@@ -993,7 +1070,7 @@ class MainWindow(QMainWindow):
         if not duplicates:
             item = QListWidgetItem("暂无重复图片")
             item.setFlags(item.flags() & ~Qt.ItemIsSelectable & ~Qt.ItemIsEnabled)
-            item.setForeground(QColor("#7f8c8d"))
+            item.setForeground(QColor(theme_manager.colors.text_disabled))
             self.duplicate_list.addItem(item)
 
     def update_threshold(self, threshold: int):
@@ -1059,18 +1136,26 @@ class MainWindow(QMainWindow):
         self.hash_dialog.cancel_requested.connect(hash_service.cancel)
         # 最小化时显示恢复按钮，恢复时隐藏
         self.hash_dialog.minimization_changed.connect(self.on_hash_dialog_minimized)
+        # 对话框以任何方式关闭（完成/取消/出错）时，确保恢复按钮也被隐藏
+        # 防止对话框处于隐藏态被 accept() 关闭时不触发 minimization_changed 信号
+        self.hash_dialog.finished.connect(lambda: self.on_hash_dialog_minimized(False))
         self.hash_dialog.show()
 
     def on_hash_dialog_minimized(self, minimized: bool):
         """哈希分析弹窗最小化/恢复时切换恢复按钮的可见性。"""
         self.restore_hash_dialog_btn.setVisible(minimized)
         if minimized:
-            self.set_status("哈希分析已最小化，点击右侧「恢复分析」重新展开")
+            self.set_status("后台分析相似度：计算图像哈希")
 
     def restore_hash_dialog(self):
-        """恢复最小化的哈希分析弹窗。"""
-        if hasattr(self, 'hash_dialog') and self.hash_dialog and self.hash_dialog.isVisible():
-            self.hash_dialog.setWindowState(self.hash_dialog.windowState() & ~Qt.WindowMinimized)
+        """恢复哈希分析弹窗（从隐藏状态显示，而非从系统最小化还原）。
+
+        弹窗的最小化按钮已被重定义为「隐藏」，因此恢复时用 show() 显示窗口，
+        同时确保窗口处于正常状态并提到前台。
+        """
+        if hasattr(self, 'hash_dialog') and self.hash_dialog:
+            self.hash_dialog.show()
+            self.hash_dialog.setWindowState(Qt.WindowNoState)
             self.hash_dialog.raise_()
             self.hash_dialog.activateWindow()
             self.restore_hash_dialog_btn.setVisible(False)
@@ -1150,23 +1235,10 @@ class MainWindow(QMainWindow):
             self.update_recent_folders(self.presenter.get_recent_folders())
 
     def on_threshold_changed(self, threshold: int):
-        """滑块值变化：立即更新数字显示（即时反馈），重启防抖定时器延迟执行重分组。
-
-        拖动时 valueChanged 高频触发，若每次都执行 group_by_similarity(O(n²)) +
-        磁盘 IO + UI 刷新会导致明显卡顿。防抖 300ms 后才调用 Presenter 执行重量级操作。
-        """
-        # 输入框有焦点时（用户正在编辑）不覆盖其文本，避免干扰输入
+        """滑块值变化：立即更新数字显示（即时反馈），调用 Presenter 启动防抖。"""
         if not self.threshold_value_edit.hasFocus():
             self.threshold_value_edit.setText(str(threshold))
-        self._pending_threshold = threshold
-        self._threshold_timer.start()
-
-    def _apply_threshold(self):
-        """防抖超时后执行：调用 Presenter 进行重分组等重量级操作。"""
-        if self._pending_threshold is not None:
-            threshold = self._pending_threshold
-            self._pending_threshold = None
-            self.presenter.on_threshold_changed(threshold)
+        self.presenter.on_threshold_changed(threshold)
 
     def on_threshold_minus(self):
         """减号按钮：阈值减 1（下限 2）。通过设置滑块值触发统一变更流程。"""
@@ -1213,6 +1285,16 @@ class MainWindow(QMainWindow):
 
     def rotate_image(self, clockwise: bool, angle: int = 90):
         self.presenter.rotate_image(clockwise, angle)
+
+    def undo_classify(self):
+        """撤回最后一次分类操作。"""
+        self.presenter.undo_classify()
+        self.update_undo_btn_state()
+
+    def update_undo_btn_state(self):
+        """更新撤回按钮的启用/禁用状态。"""
+        if hasattr(self, 'undo_btn'):
+            self.undo_btn.setEnabled(self.presenter.has_undo_history())
 
     def add_shortcut(self):
         dialog = ShortcutInputDialog(self)
@@ -1276,19 +1358,17 @@ class MainWindow(QMainWindow):
     def clear_storage(self):
         self.presenter.clear_storage()
 
+    def show_settings(self):
+        dialog = SettingsDialog(self)
+        dialog.exec_()
+
     def on_image_classified(self, old_path, new_path):
         debug_manager.log_info('图片分类完成', 'classification', old_path=old_path, new_path=new_path)
-        # 分类后清除已移动图片的缓存
-        if old_path in self._image_cache:
-            del self._image_cache[old_path]
+        self.presenter.invalidate_image_cache(old_path)
 
     def invalidate_image_cache(self, path: str = None):
         """清除图片缓存。若指定路径则只清除该路径，否则清除全部。"""
-        if path:
-            if path in self._image_cache:
-                del self._image_cache[path]
-        else:
-            self._image_cache.clear()
+        self.presenter.invalidate_image_cache(path)
 
     def refresh_groups(self):
         self.show_current_image()

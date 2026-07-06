@@ -10,7 +10,8 @@ from PyQt5.QtGui import QPixmap, QFont
 from PyQt5.QtCore import Qt, QSize
 
 from core.debug_manager import debug_manager
-from core.utils import format_size
+from core.utils import format_size, smart_sort_duplicate_paths, get_copy_score
+from core.theme_manager import theme_manager
 
 
 class DuplicateDetailDialog(QDialog):
@@ -26,6 +27,8 @@ class DuplicateDetailDialog(QDialog):
     def __init__(self, paths_list: list, parent=None, md5_hashes=None):
         super().__init__(parent)
         self.setWindowTitle("重复图片详情")
+        # 移除标题栏右侧默认的问号帮助按钮（未填充实际功能）
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         self.setGeometry(100, 100, 1000, 800)
 
         self.groups = []
@@ -66,36 +69,46 @@ class DuplicateDetailDialog(QDialog):
     def init_ui(self):
         layout = QVBoxLayout(self)
         
+        c = theme_manager.colors
         total_images = sum(len(paths) for _, paths in self.groups)
         info_label = QLabel(f"共发现 {len(self.groups)} 组重复图片，总计 {total_images} 张")
         info_label.setFont(QFont("Arial", 12, QFont.Bold))
-        info_label.setStyleSheet("color: #c0392b;")
+        info_label.setStyleSheet(f"color: {c.danger};")
         layout.addWidget(info_label)
         
         scroll_area = QWidget()
         scroll_layout = QVBoxLayout(scroll_area)
         
         for group_idx, (md5_hash, paths) in enumerate(self.groups):
+            sorted_paths = smart_sort_duplicate_paths(paths)
+            c = theme_manager.colors
             group_frame = QWidget()
             group_layout = QVBoxLayout(group_frame)
             group_layout.setContentsMargins(10, 10, 10, 10)
-            group_frame.setStyleSheet("border: 1px solid #34495e; border-radius: 5px; margin-bottom: 10px;")
+            group_frame.setStyleSheet(f"border: 1px solid {c.border}; border-radius: 5px; margin-bottom: 10px;")
             
-            group_label = QLabel(f"重复组 {group_idx + 1}（{len(paths)}张图片）")
+            group_label = QLabel(f"重复组 {group_idx + 1}（{len(sorted_paths)}张图片）")
             group_label.setFont(QFont("Arial", 10, QFont.Bold))
-            group_label.setStyleSheet("color: #3498db;")
+            group_label.setStyleSheet(f"color: {c.accent};")
             group_layout.addWidget(group_label)
             
             grid_layout = QGridLayout()
             
-            for i, path in enumerate(paths):
+            for i, path in enumerate(sorted_paths):
                 row = i // 2
                 col = i % 2
                 
                 img_widget = QWidget()
                 img_layout = QVBoxLayout(img_widget)
                 
-                checkbox = QCheckBox(f"图片 {i + 1}")
+                copy_score = get_copy_score(path)
+                is_copy = copy_score > 0
+                if i == 0:
+                    checkbox = QCheckBox(f"图片 {i + 1}（推荐保留）")
+                elif is_copy:
+                    checkbox = QCheckBox(f"图片 {i + 1}（疑似副本）")
+                else:
+                    checkbox = QCheckBox(f"图片 {i + 1}")
                 if i > 0:
                     checkbox.setChecked(True)
                     self.selected_paths.add(path)
@@ -110,7 +123,7 @@ class DuplicateDetailDialog(QDialog):
                         img_label = QLabel()
                         img_label.setPixmap(scaled_pixmap)
                         img_label.setAlignment(Qt.AlignCenter)
-                        img_label.setStyleSheet("background-color: #2a2a2a;")
+                        img_label.setStyleSheet(f"background-color: {c.image_bg};")
                         img_layout.addWidget(img_label)
                     else:
                         img_layout.addWidget(QLabel("无法加载图片"))
@@ -122,7 +135,7 @@ class DuplicateDetailDialog(QDialog):
                     info_text = QLabel(file_info)
                     info_text.setWordWrap(True)
                     info_text.setFont(QFont("Arial", 8))
-                    info_text.setStyleSheet("color: #7f8c8d;")
+                    info_text.setStyleSheet(f"color: {c.text_hint};")
                     img_layout.addWidget(info_text)
                 except Exception:
                     img_layout.addWidget(QLabel(f"文件名: {os.path.basename(path)}"))
@@ -160,8 +173,9 @@ class DuplicateDetailDialog(QDialog):
         cancel_btn.clicked.connect(self.reject)
         button_layout.addWidget(cancel_btn)
         
+        c = theme_manager.colors
         delete_btn = QPushButton("删除选中")
-        delete_btn.setStyleSheet("background-color: #e74c3c; color: white;")
+        delete_btn.setStyleSheet(f"background-color: {c.danger}; color: white;")
         delete_btn.clicked.connect(self.delete_selected)
         button_layout.addWidget(delete_btn)
         
@@ -194,7 +208,8 @@ class DuplicateDetailDialog(QDialog):
 
     def select_all(self):
         for md5_hash, paths in self.groups:
-            for i, path in enumerate(paths):
+            sorted_paths = smart_sort_duplicate_paths(paths)
+            for i, path in enumerate(sorted_paths):
                 if i > 0:
                     self.selected_paths.add(path)
         self.update_checkboxes()
@@ -206,7 +221,8 @@ class DuplicateDetailDialog(QDialog):
     def keep_first_only(self):
         self.selected_paths.clear()
         for md5_hash, paths in self.groups:
-            for i, path in enumerate(paths):
+            sorted_paths = smart_sort_duplicate_paths(paths)
+            for i, path in enumerate(sorted_paths):
                 if i > 0:
                     self.selected_paths.add(path)
         self.update_checkboxes()

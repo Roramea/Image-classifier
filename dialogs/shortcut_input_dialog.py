@@ -4,6 +4,7 @@ from PyQt5.QtGui import QKeyEvent
 
 from core.utils import key_to_string, is_conflicting_key
 from core.debug_manager import debug_manager
+from core.theme_manager import theme_manager
 
 
 class ShortcutInputDialog(QDialog):
@@ -12,30 +13,33 @@ class ShortcutInputDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("设置快捷键")
+        # 移除标题栏右侧默认的问号帮助按钮（未填充实际功能）
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         self.setFixedSize(320, 190)
+        c = theme_manager.colors
         self.setModal(True)
         self.setFocusPolicy(Qt.StrongFocus)
-        self.setStyleSheet("""
-            QDialog {
-                background-color: #2d2d2d;
-            }
-            QLabel {
-                color: #ecf0f1;
-            }
-            QPushButton {
-                background-color: #34495e;
-                color: #ecf0f1;
-                border: 1px solid #2c3e50;
+        self.setStyleSheet(f"""
+            QDialog {{
+                background-color: {c.window_bg};
+            }}
+            QLabel {{
+                color: {c.text_primary};
+            }}
+            QPushButton {{
+                background-color: {c.button_bg};
+                color: {c.text_primary};
+                border: 1px solid {c.button_border};
                 border-radius: 3px;
                 padding: 6px 16px;
-            }
-            QPushButton:hover {
-                background-color: #3d566e;
-            }
-            QPushButton:disabled {
-                background-color: #2c3e50;
-                color: #7f8c8d;
-            }
+            }}
+            QPushButton:hover {{
+                background-color: {c.button_hover};
+            }}
+            QPushButton:disabled {{
+                background-color: {c.button_pressed};
+                color: {c.text_disabled};
+            }}
         """)
         
         self.selected_key = None
@@ -52,25 +56,26 @@ class ShortcutInputDialog(QDialog):
         main_layout = QVBoxLayout()
         main_layout.setContentsMargins(20, 20, 20, 20)
         
+        c = theme_manager.colors
         self.title_label = QLabel("请按下要绑定的按键")
         self.title_label.setAlignment(Qt.AlignCenter)
-        self.title_label.setStyleSheet("font-size: 16px; color: #ecf0f1; font-weight: bold;")
+        self.title_label.setStyleSheet(f"font-size: 16px; color: {c.text_primary}; font-weight: bold;")
         
         self.key_display = QLabel("")
         self.key_display.setAlignment(Qt.AlignCenter)
-        self.key_display.setStyleSheet("""
+        self.key_display.setStyleSheet(f"""
             font-size: 48px; 
             font-weight: bold; 
-            color: #3498db; 
-            border: 2px dashed #34495e; 
+            color: {c.accent}; 
+            border: 2px dashed {c.border}; 
             border-radius: 10px; 
             padding: 20px;
-            background-color: #1e1e1e;
+            background-color: {c.list_bg};
         """)
         
         self.hint_label = QLabel("按 ESC 取消 | 按 Enter 确认")
         self.hint_label.setAlignment(Qt.AlignCenter)
-        self.hint_label.setStyleSheet("font-size: 12px; color: #7f8c8d;")
+        self.hint_label.setStyleSheet(f"font-size: 12px; color: {c.text_hint};")
         
         button_layout = QHBoxLayout()
         

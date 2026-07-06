@@ -1,11 +1,14 @@
 import os
 from typing import List, Dict, Tuple, Optional
 
+from PyQt5.QtCore import QTimer
+
 from core.scan_thread import ScanThread
 from core.classification_manager import ClassificationManager
 from services.duplicate_service import DuplicateService
 from services.classification_service import ClassificationService
 from services.hash_analysis_service import HashAnalysisService
+from services.image_cache_service import ImageCacheService
 from core.debug_manager import debug_manager
 
 
@@ -19,6 +22,7 @@ class MainPresenter:
         self.classifier = ClassificationManager()
         self.duplicate_service = DuplicateService(self.classifier)
         self.classification_service = ClassificationService(self.classifier)
+        self.image_cache_service = ImageCacheService()
 
     def _init_state(self):
         self.hash_scanning = False
@@ -27,6 +31,12 @@ class MainPresenter:
         self.group_rotations = {}
         self._resuming_session = False
         self._pending_session_data = None
+
+        self._threshold_timer = QTimer()
+        self._threshold_timer.setSingleShot(True)
+        self._threshold_timer.setInterval(300)
+        self._threshold_timer.timeout.connect(self._apply_threshold)
+        self._pending_threshold = None
 
     def load_initial_data(self):
         self.classifier.load_config()
@@ -280,6 +290,7 @@ class MainPresenter:
         self.view.invalidate_image_cache()
 
         self.classification_service.set_groups([[path] for path in image_paths])
+        self.classification_service.clear_classify_history()
         self.group_rotations = {}
 
     def _restore_session_progress(self, session: dict, image_paths: list):
@@ -298,11 +309,18 @@ class MainPresenter:
         valid_processed = [p for p in processed if p in image_paths]
         for p in valid_processed:
             self.classification_service.mark_processed(p)
-        # 还原当前图片索引：找到当前图片在 image_paths 中的位置
-        if current_image and current_image in image_paths:
-            idx = image_paths.index(current_image)
-            self.classification_service.current_group_index = idx
-            self.classification_service.current_image_index = 0
+        # 还原当前图片索引：遍历分组找到图片所在的组和组内位置
+        if current_image:
+            groups = self.classification_service.get_groups()
+            for group_idx, group in enumerate(groups):
+                if current_image in group:
+                    self.classification_service.current_group_index = group_idx
+                    self.classification_service.current_image_index = group.index(current_image)
+                    debug_manager.log_info(
+                        '会话进度恢复完成', 'session',
+                        group_index=group_idx, image_index=group.index(current_image)
+                    )
+                    break
         # 恢复后清除未完成会话标记（用户已继续，会话生效）
         self.classifier.clear_unfinished_session()
 
@@ -381,33 +399,39 @@ class MainPresenter:
         self.view.update_threshold(threshold)
 
     def on_threshold_changed(self, threshold: int):
-        """主窗口阈值变化（防抖后触发）：执行重分组等重量级操作。
+        """主窗口阈值变化：更新数字显示并启动防抖定时器，延迟执行重分组。
 
-        View 层已即时更新数字显示并防抖，此处无需再调用 update_threshold_display。
-        若哈希分析弹窗正在显示，同步阈值到弹窗滑块，避免两端显示不一致。
+        拖动时 valueChanged 高频触发，若每次都执行 group_by_similarity(O(n²)) +
+        磁盘 IO + UI 刷新会导致明显卡顿。防抖 300ms 后才执行重量级操作。
         """
-        debug_manager.log_info('主窗口阈值变化', 'hash', threshold=threshold)
-        self.classifier.set_hash_threshold(threshold)
-        # 同步到正在显示的哈希分析弹窗（若存在）
-        self.view.sync_hash_dialog_threshold(threshold)
+        self._pending_threshold = threshold
+        self._threshold_timer.start()
 
-        if self.hash_completed and self.hash_list:
-            debug_manager.log_info('重新分组', 'hash', threshold=threshold, hash_count=len(self.hash_list))
-            # 调用 HashAnalysisService 的无状态静态方法重新分组，耦合度低可接受
-            groups = HashAnalysisService.group_by_similarity(self.hash_list, threshold)
-            self._apply_groups(groups)
+    def _apply_threshold(self):
+        """防抖超时后执行：调用分类器进行重分组等重量级操作。"""
+        if self._pending_threshold is not None:
+            threshold = self._pending_threshold
+            self._pending_threshold = None
+            debug_manager.log_info('主窗口阈值变化', 'hash', threshold=threshold)
+            self.classifier.set_hash_threshold(threshold)
+            self.view.sync_hash_dialog_threshold(threshold)
 
-            all_image_paths = []
-            for group in groups:
-                all_image_paths.extend(group)
-            cache = self.classifier.build_hash_cache(
-                all_image_paths, groups, self.duplicate_service.get_duplicates(), self.hash_list
-            )
-            self.classifier.save_hash_cache(cache)
+            if self.hash_completed and self.hash_list:
+                debug_manager.log_info('重新分组', 'hash', threshold=threshold, hash_count=len(self.hash_list))
+                groups = HashAnalysisService.group_by_similarity(self.hash_list, threshold)
+                self._apply_groups(groups)
 
-            self.view.show_current_image()
-            self.view.update_duplicate_list(self.duplicate_service.get_duplicates())
-            self._update_hash_status(groups, self.duplicate_service.get_duplicates())
+                all_image_paths = []
+                for group in groups:
+                    all_image_paths.extend(group)
+                cache = self.classifier.build_hash_cache(
+                    all_image_paths, groups, self.duplicate_service.get_duplicates(), self.hash_list
+                )
+                self.classifier.save_hash_cache(cache)
+
+                self.view.show_current_image()
+                self.view.update_duplicate_list(self.duplicate_service.get_duplicates())
+                self._update_hash_status(groups, self.duplicate_service.get_duplicates())
 
     def on_hash_canceled(self):
         self.hash_scanning = False
@@ -546,6 +570,7 @@ class MainPresenter:
 
         target_path = self.classifier.classify_image(current_path, category)
         if target_path:
+            self.classification_service.add_classify_history(current_path, target_path, category)
             self.view.on_image_classified(current_path, target_path)
             self.classification_service.mark_processed(current_path)
 
@@ -554,6 +579,14 @@ class MainPresenter:
 
             self.view.show_current_image()
             self.view.update_duplicate_list(self.duplicate_service.get_duplicates())
+            self.view.update_undo_btn_state()
+
+            target_folder = os.path.basename(os.path.dirname(target_path))
+            filename = os.path.basename(current_path)
+            total_processed = len(self.classification_service.processed_images)
+            total_groups = self.classification_service.get_groups()
+            total_images = sum(len(g) for g in total_groups) + total_processed
+            self.view.set_status(f"已分类: {filename} -> {target_folder} ({total_processed}/{total_images})")
 
     def _remove_from_hash_list(self, path: str):
         """从 hash_list 中增量移除指定路径，避免 O(n²) 重新分组。"""
@@ -561,6 +594,56 @@ class MainPresenter:
         if len(new_hash_list) != len(self.hash_list):
             self.hash_list = new_hash_list
             debug_manager.log_info('hash_list 增量移除', 'hash', removed=path, remaining=len(self.hash_list))
+
+    def undo_classify(self):
+        """撤回最后一次分类操作。"""
+        record = self.classification_service.pop_classify_history()
+        if not record:
+            self.view.set_status("没有可撤回的分类操作")
+            return
+
+        original_path = record['original_path']
+        target_path = record['target_path']
+
+        if not os.path.exists(target_path):
+            self.view.show_warning_message(f"文件不存在: {target_path}")
+            return
+
+        try:
+            import shutil
+            shutil.move(target_path, original_path)
+            debug_manager.log_info('分类撤回成功', 'classification', 
+                                  original=original_path, target=target_path)
+
+            self.classification_service.add_path_back(original_path)
+
+            if self.hash_completed and self.hash_list:
+                new_hash_list = [(p, h) for p, h in self.hash_list if p != original_path]
+                for group in self.classification_service.get_groups():
+                    if original_path in group:
+                        for p, h in self.hash_list:
+                            if p == original_path:
+                                new_hash_list.append((original_path, h))
+                                break
+                self.hash_list = new_hash_list
+
+            self.view.invalidate_image_cache(target_path)
+            self.view.show_current_image()
+            self.view.update_duplicate_list(self.duplicate_service.get_duplicates())
+
+            filename = os.path.basename(original_path)
+            total_processed = len(self.classification_service.processed_images)
+            total_groups = self.classification_service.get_groups()
+            total_images = sum(len(g) for g in total_groups) + total_processed
+            self.view.set_status(f"已撤回: {filename} ({total_processed}/{total_images})")
+        except Exception as e:
+            debug_manager.log_exception(e, 'classification', 
+                                       original=original_path, target=target_path)
+            self.view.show_error_message(f"撤回失败: {str(e)}")
+
+    def has_undo_history(self) -> bool:
+        """检查是否有可撤回的分类记录。"""
+        return self.classification_service.classify_history != []
 
     def add_shortcut(self, key_string: str, folder_path: str):
         if not self.classifier.current_folder:
@@ -682,6 +765,22 @@ class MainPresenter:
         """获取当前快捷键映射，供 View 层按键匹配使用。"""
         return self.classifier.get_all_shortcuts()
 
+    def handle_key_press(self, key_str: str) -> bool:
+        """处理按键事件，匹配快捷键映射触发分类。
+
+        Args:
+            key_str: 按键字符串（已转换为小写）
+
+        Returns:
+            True if a shortcut was matched and classification was triggered, False otherwise
+        """
+        shortcuts = self.classifier.get_all_shortcuts()
+        if key_str in shortcuts:
+            debug_manager.log_info('快捷键触发分类', 'shortcut', key=key_str)
+            self.classify_image(key_str)
+            return True
+        return False
+
     def get_groups(self) -> list:
         return self.classification_service.get_groups()
 
@@ -692,7 +791,7 @@ class MainPresenter:
         """重命名当前图片文件。
 
         Args:
-            new_filename: 新文件名（可以带或不带扩展名；不带则保留原扩展名）
+            new_filename: 新文件名（仅文件名部分，不含扩展名）
 
         Returns:
             (是否成功, 消息文本)
@@ -705,11 +804,9 @@ class MainPresenter:
         old_name = os.path.basename(old_path)
         _, old_ext = os.path.splitext(old_name)
 
-        # 处理新文件名：若没有扩展名则追加原扩展名
-        new_name_base, new_ext = os.path.splitext(new_filename)
-        if not new_ext:
-            new_filename = new_name_base + old_ext
-            new_ext = old_ext
+        # 处理新文件名：始终使用原文件的扩展名，忽略用户输入的扩展名
+        new_name_base = os.path.splitext(new_filename)[0]
+        new_filename = new_name_base + old_ext
 
         # 校验文件名不含非法字符
         invalid_chars = '<>:"/\\|?*'
@@ -770,6 +867,10 @@ class MainPresenter:
     def get_current_group_size(self) -> int:
         return len(self.classification_service.get_current_group())
 
+    def refresh_groups(self):
+        """刷新分组：移除已不存在的图片路径，校正当前索引。"""
+        self.classification_service.refresh_groups()
+
     def get_duplicates(self) -> dict:
         return self.duplicate_service.get_duplicates()
 
@@ -778,3 +879,15 @@ class MainPresenter:
 
     def get_recent_folders(self) -> list:
         return self.classifier.get_recent_folders()
+
+    def get_image_from_cache(self, path: str):
+        return self.image_cache_service.get(path)
+
+    def cache_image(self, path: str, pixmap):
+        self.image_cache_service.set(path, pixmap)
+
+    def invalidate_image_cache(self, path: str = None):
+        if path:
+            self.image_cache_service.remove(path)
+        else:
+            self.image_cache_service.clear()

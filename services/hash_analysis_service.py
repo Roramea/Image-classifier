@@ -136,7 +136,7 @@ class HashAnalysisService(Observer):
             filename = self._extract_filename(path)
             progress = len(self.image_paths) + processed_count + i + 1
             stage_progress = int((processed_count + i + 1) / len(self.image_paths) * 100)
-            self._emit_progress(progress, total_steps, stage_name, filename, progress, stage_progress)
+            self._emit_progress(progress, total_steps, stage_name, filename, processed_count + i + 1, stage_progress)
             self.emit('analysis_file_processed', filename, processed_count + i + 1, len(self.image_paths))
 
             try:
@@ -154,7 +154,7 @@ class HashAnalysisService(Observer):
         hash_count = len(hash_list)
         debug_manager.log_info(f'开始{stage_name}', 'hash', hash_count=hash_count)
         self.emit('analysis_stage_changed', stage_name, 0, hash_count)
-        self._emit_progress(len(self.image_paths) * 2, total_steps, stage_name, "", len(self.image_paths) * 2, 0)
+        self._emit_progress(len(self.image_paths) * 2, total_steps, stage_name, "", len(self.image_paths), 0)
 
         visited = set()
         groups = []
@@ -174,7 +174,7 @@ class HashAnalysisService(Observer):
             filename = self._extract_filename(path1)
             progress = len(self.image_paths) * 2 + i + 1
             stage_progress = int((i + 1) / hash_count * 100) if hash_count > 0 else 100
-            self._emit_progress(progress, total_steps, stage_name, filename, progress, stage_progress)
+            self._emit_progress(progress, total_steps, stage_name, filename, len(self.image_paths), stage_progress)
             self.emit('analysis_file_processed', filename, i + 1, hash_count)
 
             try:

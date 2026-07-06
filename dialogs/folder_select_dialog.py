@@ -9,12 +9,15 @@ from PyQt5.QtGui import QIcon
 from PyQt5.QtCore import Qt
 
 from core.debug_manager import debug_manager
+from core.theme_manager import theme_manager
 
 
 class FolderSelectDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("选择或新建文件夹")
+        # 移除标题栏右侧默认的问号帮助按钮（未填充实际功能）
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         self.setGeometry(200, 200, 600, 450)
         
         self.current_path = os.path.expanduser("~")
@@ -59,9 +62,10 @@ class FolderSelectDialog(QDialog):
         cancel_btn.clicked.connect(self.reject)
         btn_layout.addWidget(cancel_btn)
         
+        c = theme_manager.colors
         select_btn = QPushButton("选择")
         select_btn.clicked.connect(self.accept)
-        select_btn.setStyleSheet("background-color: #3498db; color: white;")
+        select_btn.setStyleSheet(f"background-color: {c.accent}; color: white;")
         btn_layout.addWidget(select_btn)
         
         layout.addLayout(btn_layout)
