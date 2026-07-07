@@ -9,7 +9,6 @@ from PyQt5.QtGui import QIcon
 from PyQt5.QtCore import Qt
 
 from core.debug_manager import debug_manager
-from core.theme_manager import theme_manager
 
 
 class FolderSelectDialog(QDialog):
@@ -62,10 +61,9 @@ class FolderSelectDialog(QDialog):
         cancel_btn.clicked.connect(self.reject)
         btn_layout.addWidget(cancel_btn)
         
-        c = theme_manager.colors
         select_btn = QPushButton("选择")
         select_btn.clicked.connect(self.accept)
-        select_btn.setStyleSheet(f"background-color: {c.accent}; color: white;")
+        select_btn.setStyleSheet("background-color: #3498db; color: white;")
         btn_layout.addWidget(select_btn)
         
         layout.addLayout(btn_layout)

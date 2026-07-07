@@ -6,7 +6,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from PyQt5.QtWidgets import QApplication
 from views.main_window import MainWindow
 from core.debug_manager import debug_manager
-from core.theme_manager import theme_manager
 
 
 def handle_exception(exc_type, exc_value, exc_traceback):
@@ -24,6 +23,7 @@ def handle_exception(exc_type, exc_value, exc_traceback):
 
 def main():
     sys.excepthook = handle_exception
+    debug_manager.start_http_server(8765)
     debug_manager.log_info('应用启动', 'app')
     
     app = QApplication(sys.argv)

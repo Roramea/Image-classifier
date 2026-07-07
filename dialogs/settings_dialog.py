@@ -5,7 +5,6 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt
 
 from core.debug_manager import debug_manager
-from core.theme_manager import theme_manager
 
 
 class SettingsDialog(QDialog):
@@ -32,10 +31,9 @@ class SettingsDialog(QDialog):
         layout.setSpacing(10)
 
         # 占位提示：具体设置项后续填充
-        c = theme_manager.colors
         placeholder = QLabel("设置项稍后填充")
         placeholder.setAlignment(Qt.AlignCenter)
-        placeholder.setStyleSheet(f"color: {c.text_hint}; font-size: 13px;")
+        placeholder.setStyleSheet("color: #7f8c8d; font-size: 13px;")
         layout.addWidget(placeholder)
 
         # 预留滚动区域，便于后续添加多个设置项

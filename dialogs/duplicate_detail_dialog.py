@@ -11,7 +11,6 @@ from PyQt5.QtCore import Qt, QSize
 
 from core.debug_manager import debug_manager
 from core.utils import format_size, smart_sort_duplicate_paths, get_copy_score
-from core.theme_manager import theme_manager
 
 
 class DuplicateDetailDialog(QDialog):
@@ -69,11 +68,10 @@ class DuplicateDetailDialog(QDialog):
     def init_ui(self):
         layout = QVBoxLayout(self)
         
-        c = theme_manager.colors
         total_images = sum(len(paths) for _, paths in self.groups)
         info_label = QLabel(f"共发现 {len(self.groups)} 组重复图片，总计 {total_images} 张")
         info_label.setFont(QFont("Arial", 12, QFont.Bold))
-        info_label.setStyleSheet(f"color: {c.danger};")
+        info_label.setStyleSheet("color: #c0392b;")
         layout.addWidget(info_label)
         
         scroll_area = QWidget()
@@ -81,15 +79,14 @@ class DuplicateDetailDialog(QDialog):
         
         for group_idx, (md5_hash, paths) in enumerate(self.groups):
             sorted_paths = smart_sort_duplicate_paths(paths)
-            c = theme_manager.colors
             group_frame = QWidget()
             group_layout = QVBoxLayout(group_frame)
             group_layout.setContentsMargins(10, 10, 10, 10)
-            group_frame.setStyleSheet(f"border: 1px solid {c.border}; border-radius: 5px; margin-bottom: 10px;")
+            group_frame.setStyleSheet("border: 1px solid #34495e; border-radius: 5px; margin-bottom: 10px;")
             
             group_label = QLabel(f"重复组 {group_idx + 1}（{len(sorted_paths)}张图片）")
             group_label.setFont(QFont("Arial", 10, QFont.Bold))
-            group_label.setStyleSheet(f"color: {c.accent};")
+            group_label.setStyleSheet("color: #3498db;")
             group_layout.addWidget(group_label)
             
             grid_layout = QGridLayout()
@@ -123,7 +120,7 @@ class DuplicateDetailDialog(QDialog):
                         img_label = QLabel()
                         img_label.setPixmap(scaled_pixmap)
                         img_label.setAlignment(Qt.AlignCenter)
-                        img_label.setStyleSheet(f"background-color: {c.image_bg};")
+                        img_label.setStyleSheet("background-color: #2a2a2a;")
                         img_layout.addWidget(img_label)
                     else:
                         img_layout.addWidget(QLabel("无法加载图片"))
@@ -135,7 +132,7 @@ class DuplicateDetailDialog(QDialog):
                     info_text = QLabel(file_info)
                     info_text.setWordWrap(True)
                     info_text.setFont(QFont("Arial", 8))
-                    info_text.setStyleSheet(f"color: {c.text_hint};")
+                    info_text.setStyleSheet("color: #7f8c8d;")
                     img_layout.addWidget(info_text)
                 except Exception:
                     img_layout.addWidget(QLabel(f"文件名: {os.path.basename(path)}"))
@@ -173,9 +170,8 @@ class DuplicateDetailDialog(QDialog):
         cancel_btn.clicked.connect(self.reject)
         button_layout.addWidget(cancel_btn)
         
-        c = theme_manager.colors
         delete_btn = QPushButton("删除选中")
-        delete_btn.setStyleSheet(f"background-color: {c.danger}; color: white;")
+        delete_btn.setStyleSheet("background-color: #e74c3c; color: white;")
         delete_btn.clicked.connect(self.delete_selected)
         button_layout.addWidget(delete_btn)
         

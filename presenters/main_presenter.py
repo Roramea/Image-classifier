@@ -1,14 +1,11 @@
 import os
 from typing import List, Dict, Tuple, Optional
 
-from PyQt5.QtCore import QTimer
-
 from core.scan_thread import ScanThread
 from core.classification_manager import ClassificationManager
 from services.duplicate_service import DuplicateService
 from services.classification_service import ClassificationService
 from services.hash_analysis_service import HashAnalysisService
-from services.image_cache_service import ImageCacheService
 from core.debug_manager import debug_manager
 
 
@@ -22,7 +19,6 @@ class MainPresenter:
         self.classifier = ClassificationManager()
         self.duplicate_service = DuplicateService(self.classifier)
         self.classification_service = ClassificationService(self.classifier)
-        self.image_cache_service = ImageCacheService()
 
     def _init_state(self):
         self.hash_scanning = False
@@ -31,12 +27,6 @@ class MainPresenter:
         self.group_rotations = {}
         self._resuming_session = False
         self._pending_session_data = None
-
-        self._threshold_timer = QTimer()
-        self._threshold_timer.setSingleShot(True)
-        self._threshold_timer.setInterval(300)
-        self._threshold_timer.timeout.connect(self._apply_threshold)
-        self._pending_threshold = None
 
     def load_initial_data(self):
         self.classifier.load_config()
@@ -399,39 +389,33 @@ class MainPresenter:
         self.view.update_threshold(threshold)
 
     def on_threshold_changed(self, threshold: int):
-        """主窗口阈值变化：更新数字显示并启动防抖定时器，延迟执行重分组。
+        """主窗口阈值变化（防抖后触发）：执行重分组等重量级操作。
 
-        拖动时 valueChanged 高频触发，若每次都执行 group_by_similarity(O(n²)) +
-        磁盘 IO + UI 刷新会导致明显卡顿。防抖 300ms 后才执行重量级操作。
+        View 层已即时更新数字显示并防抖，此处无需再调用 update_threshold_display。
+        若哈希分析弹窗正在显示，同步阈值到弹窗滑块，避免两端显示不一致。
         """
-        self._pending_threshold = threshold
-        self._threshold_timer.start()
+        debug_manager.log_info('主窗口阈值变化', 'hash', threshold=threshold)
+        self.classifier.set_hash_threshold(threshold)
+        # 同步到正在显示的哈希分析弹窗（若存在）
+        self.view.sync_hash_dialog_threshold(threshold)
 
-    def _apply_threshold(self):
-        """防抖超时后执行：调用分类器进行重分组等重量级操作。"""
-        if self._pending_threshold is not None:
-            threshold = self._pending_threshold
-            self._pending_threshold = None
-            debug_manager.log_info('主窗口阈值变化', 'hash', threshold=threshold)
-            self.classifier.set_hash_threshold(threshold)
-            self.view.sync_hash_dialog_threshold(threshold)
+        if self.hash_completed and self.hash_list:
+            debug_manager.log_info('重新分组', 'hash', threshold=threshold, hash_count=len(self.hash_list))
+            # 调用 HashAnalysisService 的无状态静态方法重新分组，耦合度低可接受
+            groups = HashAnalysisService.group_by_similarity(self.hash_list, threshold)
+            self._apply_groups(groups)
 
-            if self.hash_completed and self.hash_list:
-                debug_manager.log_info('重新分组', 'hash', threshold=threshold, hash_count=len(self.hash_list))
-                groups = HashAnalysisService.group_by_similarity(self.hash_list, threshold)
-                self._apply_groups(groups)
+            all_image_paths = []
+            for group in groups:
+                all_image_paths.extend(group)
+            cache = self.classifier.build_hash_cache(
+                all_image_paths, groups, self.duplicate_service.get_duplicates(), self.hash_list
+            )
+            self.classifier.save_hash_cache(cache)
 
-                all_image_paths = []
-                for group in groups:
-                    all_image_paths.extend(group)
-                cache = self.classifier.build_hash_cache(
-                    all_image_paths, groups, self.duplicate_service.get_duplicates(), self.hash_list
-                )
-                self.classifier.save_hash_cache(cache)
-
-                self.view.show_current_image()
-                self.view.update_duplicate_list(self.duplicate_service.get_duplicates())
-                self._update_hash_status(groups, self.duplicate_service.get_duplicates())
+            self.view.show_current_image()
+            self.view.update_duplicate_list(self.duplicate_service.get_duplicates())
+            self._update_hash_status(groups, self.duplicate_service.get_duplicates())
 
     def on_hash_canceled(self):
         self.hash_scanning = False
@@ -765,22 +749,6 @@ class MainPresenter:
         """获取当前快捷键映射，供 View 层按键匹配使用。"""
         return self.classifier.get_all_shortcuts()
 
-    def handle_key_press(self, key_str: str) -> bool:
-        """处理按键事件，匹配快捷键映射触发分类。
-
-        Args:
-            key_str: 按键字符串（已转换为小写）
-
-        Returns:
-            True if a shortcut was matched and classification was triggered, False otherwise
-        """
-        shortcuts = self.classifier.get_all_shortcuts()
-        if key_str in shortcuts:
-            debug_manager.log_info('快捷键触发分类', 'shortcut', key=key_str)
-            self.classify_image(key_str)
-            return True
-        return False
-
     def get_groups(self) -> list:
         return self.classification_service.get_groups()
 
@@ -879,15 +847,3 @@ class MainPresenter:
 
     def get_recent_folders(self) -> list:
         return self.classifier.get_recent_folders()
-
-    def get_image_from_cache(self, path: str):
-        return self.image_cache_service.get(path)
-
-    def cache_image(self, path: str, pixmap):
-        self.image_cache_service.set(path, pixmap)
-
-    def invalidate_image_cache(self, path: str = None):
-        if path:
-            self.image_cache_service.remove(path)
-        else:
-            self.image_cache_service.clear()

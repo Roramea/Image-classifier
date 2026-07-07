@@ -8,7 +8,6 @@ from PyQt5.QtCore import Qt
 
 from core.debug_manager import debug_manager
 from core.utils import format_size
-from core.theme_manager import theme_manager
 
 
 class StorageCleanDialog(QDialog):
@@ -53,9 +52,8 @@ class StorageCleanDialog(QDialog):
             group = QGroupBox(f"{info['name']}")
             group_layout = QVBoxLayout(group)
 
-            c = theme_manager.colors
             desc_label = QLabel(f"<small>{info['description']}</small>")
-            desc_label.setStyleSheet(f"color: {c.text_hint};")
+            desc_label.setStyleSheet("color: #7f8c8d;")
             group_layout.addWidget(desc_label)
 
             size_label = QLabel(f"文件数量: {len(info['files'])} | 占用大小: {format_size(info['size'])}")
@@ -91,10 +89,9 @@ class StorageCleanDialog(QDialog):
         self.selected_size_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.selected_size_label)
 
-        c = theme_manager.colors
         clear_btn = QPushButton("清除选中")
         clear_btn.clicked.connect(self.clear_selected)
-        clear_btn.setStyleSheet(f"background-color: {c.danger_pressed}; color: white;")
+        clear_btn.setStyleSheet("background-color: #c0392b; color: white;")
         layout.addWidget(clear_btn)
 
         cancel_btn = QPushButton("取消")
