@@ -3,6 +3,8 @@ from PyQt5.QtWidgets import QLabel
 from PyQt5.QtCore import Qt, QTimer, QRect, QSize
 from PyQt5.QtGui import QPainter, QFontMetrics, QColor
 
+from core.theme_manager import theme_manager
+
 
 class ScrollingLabel(QLabel):
     """自动滚动的文本标签（跑马灯效果）。
@@ -125,7 +127,7 @@ class ScrollingLabel(QLabel):
 
         fm = QFontMetrics(self.font())
         y = (self.height() + fm.ascent() - fm.descent()) // 2
-        painter.setPen(QColor("#7f8c8d"))
+        painter.setPen(QColor(theme_manager.colors.text_hint))
         painter.setFont(self.font())
 
         if self._needs_scroll:

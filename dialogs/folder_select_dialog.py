@@ -1,7 +1,7 @@
 import os
 
 from PyQt5.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QListWidget,
+    QVBoxLayout, QHBoxLayout, QListWidget,
     QListWidgetItem, QPushButton, QLineEdit, QMessageBox,
     QLabel, QToolButton, QInputDialog
 )
@@ -9,13 +9,13 @@ from PyQt5.QtGui import QIcon
 from PyQt5.QtCore import Qt
 
 from core.debug_manager import debug_manager
+from .themed_dialog import ThemedDialog
 
 
-class FolderSelectDialog(QDialog):
+class FolderSelectDialog(ThemedDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("选择或新建文件夹")
-        # 移除标题栏右侧默认的问号帮助按钮（未填充实际功能）
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         self.setGeometry(200, 200, 600, 450)
         
@@ -23,6 +23,7 @@ class FolderSelectDialog(QDialog):
         self.selected_path = ""
         
         self.init_ui()
+        self._apply_theme()
     
     def init_ui(self):
         layout = QVBoxLayout(self)
@@ -57,18 +58,22 @@ class FolderSelectDialog(QDialog):
         
         btn_layout.addStretch()
         
-        cancel_btn = QPushButton("取消")
-        cancel_btn.clicked.connect(self.reject)
-        btn_layout.addWidget(cancel_btn)
+        self.cancel_btn = QPushButton("取消")
+        self.cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(self.cancel_btn)
         
-        select_btn = QPushButton("选择")
-        select_btn.clicked.connect(self.accept)
-        select_btn.setStyleSheet("background-color: #3498db; color: white;")
-        btn_layout.addWidget(select_btn)
+        self.select_btn = QPushButton("选择")
+        self.select_btn.clicked.connect(self.accept)
+        btn_layout.addWidget(self.select_btn)
         
         layout.addLayout(btn_layout)
         
         self.refresh_list()
+    
+    def _apply_theme(self):
+        c = self._get_colors()
+        self.setStyleSheet(self._create_dialog_base_style())
+        self.select_btn.setStyleSheet(f"background-color: {c.accent}; color: white; border: none;")
     
     def refresh_list(self):
         self.folder_list.clear()

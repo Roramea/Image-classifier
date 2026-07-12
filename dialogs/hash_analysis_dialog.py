@@ -1,13 +1,14 @@
 import time
 
-from PyQt5.QtWidgets import QDialog, QLabel, QProgressBar, QVBoxLayout, QWidget, QHBoxLayout, QSlider
+from PyQt5.QtWidgets import QLabel, QProgressBar, QVBoxLayout, QWidget, QHBoxLayout, QSlider
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QEvent
 from PyQt5.QtGui import QFont
 
 from core.debug_manager import debug_manager
+from .themed_dialog import ThemedDialog
 
 
-class HashAnalysisDialog(QDialog):
+class HashAnalysisDialog(ThemedDialog):
     """哈希分析进度对话框。
 
     职责：展示分析进度、阶段、剩余时间；让用户调整阈值；接收取消请求。
@@ -40,10 +41,8 @@ class HashAnalysisDialog(QDialog):
         """
         super().__init__(parent)
         self.setWindowTitle("图片相似度分析")
-        # 允许窗口自由缩放（最大化按钮可用），仅约束最小尺寸避免控件被挤压
         self.setMinimumSize(550, 400)
         self.setModal(False)
-        # 保留最小化与最大化按钮，移除帮助按钮
         self.setWindowFlags(
             self.windowFlags()
             & ~Qt.WindowContextHelpButtonHint
@@ -51,45 +50,35 @@ class HashAnalysisDialog(QDialog):
             | Qt.WindowMaximizeButtonHint
         )
         self.setWindowModality(Qt.NonModal)
-        self.setStyleSheet("""
-            QDialog {
-                background-color: #2d2d2d;
-            }
-            QLabel {
-                color: #ecf0f1;
-            }
-        """)
 
         self.hash_service = hash_service
         self.total_count = total_count
         self.start_time = None
         self.is_canceled = False
-        # 标记分析是否正在进行中，防止 showEvent 重复触发
         self._is_analyzing = False
-        # 本地跟踪阶段，替代直接读取 hash_service.current_stage
         self._current_stage = 0
         self.threshold = initial_threshold
 
         self.init_ui()
         self.connect_signals()
+        self._apply_theme()
     
     def init_ui(self):
         layout = QVBoxLayout()
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(12)
 
-        title_label = QLabel("图片相似度分析")
-        title_label.setFont(QFont("Microsoft YaHei", 14, QFont.Bold))
-        title_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(title_label)
+        self.title_label = QLabel("图片相似度分析")
+        self.title_label.setFont(QFont("Microsoft YaHei", 14, QFont.Bold))
+        self.title_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.title_label)
 
         threshold_layout = QHBoxLayout()
         threshold_layout.setSpacing(10)
 
-        threshold_label = QLabel("相似度阈值:")
-        threshold_label.setFont(QFont("Microsoft YaHei", 10))
-        threshold_label.setStyleSheet("color: #95a5a6;")
-        threshold_layout.addWidget(threshold_label)
+        self.threshold_label = QLabel("相似度阈值:")
+        self.threshold_label.setFont(QFont("Microsoft YaHei", 10))
+        threshold_layout.addWidget(self.threshold_label)
 
         self.threshold_slider = QSlider(Qt.Horizontal)
         self.threshold_slider.setMinimum(2)
@@ -98,63 +87,24 @@ class HashAnalysisDialog(QDialog):
         self.threshold_slider.setTickPosition(QSlider.TicksBelow)
         self.threshold_slider.setTickInterval(1)
         self.threshold_slider.valueChanged.connect(self.on_threshold_changed)
-        self.threshold_slider.setStyleSheet("""
-            QSlider::groove:horizontal {
-                height: 6px;
-                background: #1e1e1e;
-                border-radius: 3px;
-            }
-            QSlider::handle:horizontal {
-                background: #3498db;
-                border: 2px solid #2980b9;
-                width: 16px;
-                margin: -5px 0;
-                border-radius: 8px;
-            }
-            QSlider::sub-page:horizontal {
-                background: #3498db;
-                border-radius: 3px;
-            }
-            QSlider::tick:horizontal {
-                background: #7f8c8d;
-                width: 1px;
-                height: 6px;
-            }
-        """)
         threshold_layout.addWidget(self.threshold_slider)
 
         self.threshold_value_label = QLabel(f"{self.threshold}")
         self.threshold_value_label.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
-        self.threshold_value_label.setStyleSheet("color: #3498db; min-width: 30px;")
         self.threshold_value_label.setAlignment(Qt.AlignCenter)
         threshold_layout.addWidget(self.threshold_value_label)
 
         layout.addLayout(threshold_layout)
 
-        threshold_hint = QLabel("阈值越小，相似度要求越高（2-25，默认10）")
-        threshold_hint.setFont(QFont("Microsoft YaHei", 9))
-        threshold_hint.setStyleSheet("color: #7f8c8d;")
-        threshold_hint.setAlignment(Qt.AlignCenter)
-        layout.addWidget(threshold_hint)
+        self.threshold_hint = QLabel("阈值越小，相似度要求越高（2-25，默认10）")
+        self.threshold_hint.setFont(QFont("Microsoft YaHei", 9))
+        self.threshold_hint.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.threshold_hint)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setMaximum(self.total_count * 3)
         self.progress_bar.setValue(0)
         self.progress_bar.setTextVisible(True)
-        self.progress_bar.setStyleSheet("""
-            QProgressBar {
-                border: 1px solid #34495e;
-                border-radius: 5px;
-                text-align: center;
-                font-size: 12px;
-                color: #ecf0f1;
-                background-color: #1e1e1e;
-            }
-            QProgressBar::chunk {
-                background-color: #3498db;
-                border-radius: 3px;
-            }
-        """)
         layout.addWidget(self.progress_bar)
 
         self.progress_text = QLabel("0 / 0 (0%)")
@@ -165,21 +115,18 @@ class HashAnalysisDialog(QDialog):
         stage_layout = QHBoxLayout()
         stage_layout.setSpacing(10)
 
-        stage_label_text = QLabel("阶段:")
-        stage_label_text.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
-        stage_label_text.setStyleSheet("color: #95a5a6;")
-        stage_layout.addWidget(stage_label_text)
+        self.stage_label_text = QLabel("阶段:")
+        self.stage_label_text.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
+        stage_layout.addWidget(self.stage_label_text)
 
         self.stage_label = QLabel("准备中...")
         self.stage_label.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
-        self.stage_label.setStyleSheet("color: #3498db;")
         stage_layout.addWidget(self.stage_label)
 
         stage_layout.addStretch()
 
         self.time_label = QLabel("预计剩余: --")
         self.time_label.setFont(QFont("Microsoft YaHei", 10))
-        self.time_label.setStyleSheet("color: #95a5a6;")
         stage_layout.addWidget(self.time_label)
 
         layout.addLayout(stage_layout)
@@ -188,28 +135,15 @@ class HashAnalysisDialog(QDialog):
         self.current_stage_progress.setMaximum(100)
         self.current_stage_progress.setValue(0)
         self.current_stage_progress.setTextVisible(False)
-        self.current_stage_progress.setStyleSheet("""
-            QProgressBar {
-                border: 1px solid #34495e;
-                border-radius: 3px;
-                height: 6px;
-                background-color: #1e1e1e;
-            }
-            QProgressBar::chunk {
-                background-color: #3498db;
-                border-radius: 2px;
-            }
-        """)
         layout.addWidget(self.current_stage_progress)
 
-        file_label_title = QLabel("当前处理:")
-        file_label_title.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
-        layout.addWidget(file_label_title)
+        self.file_label_title = QLabel("当前处理:")
+        self.file_label_title.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
+        layout.addWidget(self.file_label_title)
 
         self.file_label = QLabel("")
         self.file_label.setWordWrap(True)
         self.file_label.setAlignment(Qt.AlignLeft)
-        self.file_label.setStyleSheet("color: #ecf0f1; font-size: 12px; background-color: #1e1e1e; padding: 8px; border: 1px solid #34495e; border-radius: 4px; min-height: 40px;")
         layout.addWidget(self.file_label)
 
         speed_layout = QHBoxLayout()
@@ -217,17 +151,84 @@ class HashAnalysisDialog(QDialog):
 
         self.speed_label = QLabel("处理速度: --")
         self.speed_label.setFont(QFont("Microsoft YaHei", 10))
-        self.speed_label.setStyleSheet("color: #95a5a6;")
         speed_layout.addWidget(self.speed_label)
 
         self.elapsed_label = QLabel("已用时: --")
         self.elapsed_label.setFont(QFont("Microsoft YaHei", 10))
-        self.elapsed_label.setStyleSheet("color: #95a5a6;")
         speed_layout.addWidget(self.elapsed_label)
 
         layout.addLayout(speed_layout)
 
         self.setLayout(layout)
+    
+    def _apply_theme(self):
+        c = self._get_colors()
+        self.setStyleSheet(f"""
+            QDialog {{
+                background-color: {c.window_bg};
+            }}
+            QLabel {{
+                color: {c.text_primary};
+            }}
+        """)
+        self.threshold_label.setStyleSheet(f"color: {c.text_secondary};")
+        self.threshold_slider.setStyleSheet(f"""
+            QSlider::groove:horizontal {{
+                height: 6px;
+                background: {c.slider_groove};
+                border-radius: 3px;
+            }}
+            QSlider::handle:horizontal {{
+                background: {c.slider_handle};
+                border: 2px solid {c.accent_hover};
+                width: 16px;
+                margin: -5px 0;
+                border-radius: 8px;
+            }}
+            QSlider::sub-page:horizontal {{
+                background: {c.slider_handle};
+                border-radius: 3px;
+            }}
+            QSlider::tick:horizontal {{
+                background: {c.slider_tick};
+                width: 1px;
+                height: 6px;
+            }}
+        """)
+        self.threshold_value_label.setStyleSheet(f"color: {c.accent}; min-width: 30px;")
+        self.threshold_hint.setStyleSheet(f"color: {c.text_hint};")
+        self.progress_bar.setStyleSheet(f"""
+            QProgressBar {{
+                border: 1px solid {c.border};
+                border-radius: 5px;
+                text-align: center;
+                font-size: 12px;
+                color: {c.text_primary};
+                background-color: {c.progress_bg};
+            }}
+            QProgressBar::chunk {{
+                background-color: {c.progress_bar};
+                border-radius: 3px;
+            }}
+        """)
+        self.stage_label_text.setStyleSheet(f"color: {c.text_secondary};")
+        self.stage_label.setStyleSheet(f"color: {c.accent};")
+        self.time_label.setStyleSheet(f"color: {c.text_secondary};")
+        self.current_stage_progress.setStyleSheet(f"""
+            QProgressBar {{
+                border: 1px solid {c.border};
+                border-radius: 3px;
+                height: 6px;
+                background-color: {c.progress_bg};
+            }}
+            QProgressBar::chunk {{
+                background-color: {c.progress_bar};
+                border-radius: 2px;
+            }}
+        """)
+        self.file_label.setStyleSheet(f"color: {c.text_primary}; font-size: 12px; background-color: {c.list_bg}; padding: 8px; border: 1px solid {c.border}; border-radius: 4px; min-height: 40px;")
+        self.speed_label.setStyleSheet(f"color: {c.text_secondary};")
+        self.elapsed_label.setStyleSheet(f"color: {c.text_secondary};")
 
     def connect_signals(self):
         """订阅 service 事件并连接 Qt 信号。
@@ -323,7 +324,7 @@ class HashAnalysisDialog(QDialog):
         self.progress_bar.setValue(current)
 
         percentage = int((current / total) * 100) if total > 0 else 0
-        self.progress_text.setText(f"{current} / {total} ({percentage}%)")
+        self.progress_text.setText(f"{processed_count} / {self.total_count} ({percentage}%)")
 
         # 使用本地跟踪的 stage，替代直接读取 hash_service.current_stage
         self.stage_label.setText(f"{self._current_stage}/3: {stage_name}")
@@ -342,7 +343,7 @@ class HashAnalysisDialog(QDialog):
     def _update_time_info(self, current: int, total: int, processed_count: int):
         elapsed = time.time() - self.start_time
         avg_time_per_file = elapsed / processed_count if processed_count > 0 else 0
-        remaining_files = total - current
+        remaining_files = self.total_count - processed_count
         estimated_remaining = avg_time_per_file * remaining_files
 
         self.time_label.setText(self._format_remaining_time(estimated_remaining))

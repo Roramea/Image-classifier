@@ -2,7 +2,7 @@ import os
 from datetime import datetime
 
 from PyQt5.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QCheckBox, QWidget, QMessageBox,
     QSizePolicy, QScrollArea
 )
@@ -11,9 +11,10 @@ from PyQt5.QtCore import Qt, QSize
 
 from core.debug_manager import debug_manager
 from core.utils import format_size, smart_sort_duplicate_paths, get_copy_score
+from .themed_dialog import ThemedDialog
 
 
-class DuplicateDetailDialog(QDialog):
+class DuplicateDetailDialog(ThemedDialog):
     """重复图片详情对话框。
 
     职责：展示重复图片组、让用户选择要删除的图片、返回用户的选择。
@@ -62,17 +63,21 @@ class DuplicateDetailDialog(QDialog):
 
         self.selected_paths = set()
         self.checkbox_map = {}
+        self._group_frames = []
+        self._group_labels = []
+        self._img_labels = []
+        self._info_texts = []
 
         self.init_ui()
+        self._apply_theme()
 
     def init_ui(self):
         layout = QVBoxLayout(self)
         
         total_images = sum(len(paths) for _, paths in self.groups)
-        info_label = QLabel(f"共发现 {len(self.groups)} 组重复图片，总计 {total_images} 张")
-        info_label.setFont(QFont("Arial", 12, QFont.Bold))
-        info_label.setStyleSheet("color: #c0392b;")
-        layout.addWidget(info_label)
+        self.info_label = QLabel(f"共发现 {len(self.groups)} 组重复图片，总计 {total_images} 张")
+        self.info_label.setFont(QFont("Arial", 12, QFont.Bold))
+        layout.addWidget(self.info_label)
         
         scroll_area = QWidget()
         scroll_layout = QVBoxLayout(scroll_area)
@@ -80,13 +85,13 @@ class DuplicateDetailDialog(QDialog):
         for group_idx, (md5_hash, paths) in enumerate(self.groups):
             sorted_paths = smart_sort_duplicate_paths(paths)
             group_frame = QWidget()
+            self._group_frames.append(group_frame)
             group_layout = QVBoxLayout(group_frame)
             group_layout.setContentsMargins(10, 10, 10, 10)
-            group_frame.setStyleSheet("border: 1px solid #34495e; border-radius: 5px; margin-bottom: 10px;")
             
             group_label = QLabel(f"重复组 {group_idx + 1}（{len(sorted_paths)}张图片）")
             group_label.setFont(QFont("Arial", 10, QFont.Bold))
-            group_label.setStyleSheet("color: #3498db;")
+            self._group_labels.append(group_label)
             group_layout.addWidget(group_label)
             
             grid_layout = QGridLayout()
@@ -120,7 +125,7 @@ class DuplicateDetailDialog(QDialog):
                         img_label = QLabel()
                         img_label.setPixmap(scaled_pixmap)
                         img_label.setAlignment(Qt.AlignCenter)
-                        img_label.setStyleSheet("background-color: #2a2a2a;")
+                        self._img_labels.append(img_label)
                         img_layout.addWidget(img_label)
                     else:
                         img_layout.addWidget(QLabel("无法加载图片"))
@@ -132,7 +137,7 @@ class DuplicateDetailDialog(QDialog):
                     info_text = QLabel(file_info)
                     info_text.setWordWrap(True)
                     info_text.setFont(QFont("Arial", 8))
-                    info_text.setStyleSheet("color: #7f8c8d;")
+                    self._info_texts.append(info_text)
                     img_layout.addWidget(info_text)
                 except Exception:
                     img_layout.addWidget(QLabel(f"文件名: {os.path.basename(path)}"))
@@ -150,32 +155,45 @@ class DuplicateDetailDialog(QDialog):
         
         button_layout = QHBoxLayout()
         
-        select_all_btn = QPushButton("全选")
-        select_all_btn.clicked.connect(self.select_all)
-        button_layout.addWidget(select_all_btn)
+        self.select_all_btn = QPushButton("全选")
+        self.select_all_btn.clicked.connect(self.select_all)
+        button_layout.addWidget(self.select_all_btn)
         
-        deselect_all_btn = QPushButton("取消全选")
-        deselect_all_btn.clicked.connect(self.deselect_all)
-        button_layout.addWidget(deselect_all_btn)
+        self.deselect_all_btn = QPushButton("取消全选")
+        self.deselect_all_btn.clicked.connect(self.deselect_all)
+        button_layout.addWidget(self.deselect_all_btn)
         
-        keep_first_btn = QPushButton("只保留第一张")
-        keep_first_btn.clicked.connect(self.keep_first_only)
-        button_layout.addWidget(keep_first_btn)
+        self.keep_first_btn = QPushButton("只保留第一张")
+        self.keep_first_btn.clicked.connect(self.keep_first_only)
+        button_layout.addWidget(self.keep_first_btn)
         
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         button_layout.addWidget(spacer)
         
-        cancel_btn = QPushButton("取消")
-        cancel_btn.clicked.connect(self.reject)
-        button_layout.addWidget(cancel_btn)
+        self.cancel_btn = QPushButton("取消")
+        self.cancel_btn.clicked.connect(self.reject)
+        button_layout.addWidget(self.cancel_btn)
         
-        delete_btn = QPushButton("删除选中")
-        delete_btn.setStyleSheet("background-color: #e74c3c; color: white;")
-        delete_btn.clicked.connect(self.delete_selected)
-        button_layout.addWidget(delete_btn)
+        self.delete_btn = QPushButton("删除选中")
+        self.delete_btn.clicked.connect(self.delete_selected)
+        button_layout.addWidget(self.delete_btn)
         
         layout.addLayout(button_layout)
+    
+    def _apply_theme(self):
+        c = self._get_colors()
+        self.setStyleSheet(self._create_dialog_base_style())
+        self.info_label.setStyleSheet(f"color: {c.danger};")
+        for frame in self._group_frames:
+            frame.setStyleSheet(f"border: 1px solid {c.border}; border-radius: 5px; margin-bottom: 10px;")
+        for label in self._group_labels:
+            label.setStyleSheet(f"color: {c.accent};")
+        for img_label in self._img_labels:
+            img_label.setStyleSheet(f"background-color: {c.image_bg};")
+        for info_text in self._info_texts:
+            info_text.setStyleSheet(f"color: {c.text_hint};")
+        self.delete_btn.setStyleSheet(f"background-color: {c.danger}; color: white; border: none;")
 
     def get_file_info(self, path: str) -> str:
         try:

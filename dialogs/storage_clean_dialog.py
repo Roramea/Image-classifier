@@ -1,5 +1,5 @@
 from PyQt5.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QGroupBox,
+    QVBoxLayout, QHBoxLayout, QGroupBox,
     QLabel, QPushButton, QCheckBox, QListWidget,
     QListWidgetItem, QMessageBox
 )
@@ -8,9 +8,10 @@ from PyQt5.QtCore import Qt
 
 from core.debug_manager import debug_manager
 from core.utils import format_size
+from .themed_dialog import ThemedDialog
 
 
-class StorageCleanDialog(QDialog):
+class StorageCleanDialog(ThemedDialog):
     """存储清理对话框。
 
     职责：展示各类存储占用情况、让用户选择要清理的类别、返回用户的选择。
@@ -29,7 +30,6 @@ class StorageCleanDialog(QDialog):
         """
         super().__init__(parent)
         self.setWindowTitle("清除存储占用")
-        # 移除标题栏右侧默认的问号帮助按钮（未填充实际功能）
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
         self.setGeometry(200, 200, 500, 450)
 
@@ -37,23 +37,28 @@ class StorageCleanDialog(QDialog):
         self._storage_details = storage_details
         self.selected_categories = []
         self.checkboxes = {}
+        self._group_boxes = []
+        self._desc_labels = []
+        self._file_lists = []
 
         debug_manager.log_info('打开存储清除对话框', 'storage', total_size=storage_size)
         self.init_ui()
+        self._apply_theme()
 
     def init_ui(self):
         layout = QVBoxLayout(self)
 
-        total_label = QLabel(f"<b>总存储占用:</b> {format_size(self._storage_size)}")
-        total_label.setFont(QFont("Arial", 11, QFont.Bold))
-        layout.addWidget(total_label)
+        self.total_label = QLabel(f"<b>总存储占用:</b> {format_size(self._storage_size)}")
+        self.total_label.setFont(QFont("Arial", 11, QFont.Bold))
+        layout.addWidget(self.total_label)
 
         for key, info in self._storage_details.items():
             group = QGroupBox(f"{info['name']}")
+            self._group_boxes.append(group)
             group_layout = QVBoxLayout(group)
 
             desc_label = QLabel(f"<small>{info['description']}</small>")
-            desc_label.setStyleSheet("color: #7f8c8d;")
+            self._desc_labels.append(desc_label)
             group_layout.addWidget(desc_label)
 
             size_label = QLabel(f"文件数量: {len(info['files'])} | 占用大小: {format_size(info['size'])}")
@@ -68,6 +73,7 @@ class StorageCleanDialog(QDialog):
             if info['files']:
                 file_list = QListWidget()
                 file_list.setMaximumHeight(80)
+                self._file_lists.append(file_list)
                 for f in info['files']:
                     item = QListWidgetItem(f"{f['name']} ({format_size(f['size'])})")
                     file_list.addItem(item)
@@ -75,28 +81,49 @@ class StorageCleanDialog(QDialog):
 
             layout.addWidget(group)
 
-        select_all_btn = QPushButton("全选")
-        select_all_btn.clicked.connect(self.select_all)
-        deselect_all_btn = QPushButton("取消全选")
-        deselect_all_btn.clicked.connect(self.deselect_all)
+        self.select_all_btn = QPushButton("全选")
+        self.select_all_btn.clicked.connect(self.select_all)
+        self.deselect_all_btn = QPushButton("取消全选")
+        self.deselect_all_btn.clicked.connect(self.deselect_all)
 
         btn_layout = QHBoxLayout()
-        btn_layout.addWidget(select_all_btn)
-        btn_layout.addWidget(deselect_all_btn)
+        btn_layout.addWidget(self.select_all_btn)
+        btn_layout.addWidget(self.deselect_all_btn)
         layout.addLayout(btn_layout)
 
         self.selected_size_label = QLabel("选中大小: 0 B")
         self.selected_size_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.selected_size_label)
 
-        clear_btn = QPushButton("清除选中")
-        clear_btn.clicked.connect(self.clear_selected)
-        clear_btn.setStyleSheet("background-color: #c0392b; color: white;")
-        layout.addWidget(clear_btn)
+        self.clear_btn = QPushButton("清除选中")
+        self.clear_btn.clicked.connect(self.clear_selected)
+        layout.addWidget(self.clear_btn)
 
-        cancel_btn = QPushButton("取消")
-        cancel_btn.clicked.connect(self.reject)
-        layout.addWidget(cancel_btn)
+        self.cancel_btn = QPushButton("取消")
+        self.cancel_btn.clicked.connect(self.reject)
+        layout.addWidget(self.cancel_btn)
+    
+    def _apply_theme(self):
+        c = self._get_colors()
+        group_box_style = f"""
+            QGroupBox {{
+                border: 1px solid {c.group_box_border};
+                border-radius: 5px;
+                margin-top: 10px;
+                padding-top: 15px;
+                color: {c.group_box_title};
+                font-weight: bold;
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px;
+            }}
+        """
+        self.setStyleSheet(self._create_dialog_base_style() + group_box_style)
+        for desc_label in self._desc_labels:
+            desc_label.setStyleSheet(f"color: {c.text_hint};")
+        self.clear_btn.setStyleSheet(f"background-color: {c.danger_pressed}; color: white; border: none;")
 
     def toggle_category(self, key: str, state: int):
         if state == Qt.Checked:
